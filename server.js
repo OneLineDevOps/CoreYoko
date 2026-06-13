@@ -1,10 +1,20 @@
-const express = require("express");
+require('dotenv').config();
+const express = require('express');
+const http = require('http');
+const cors = require('cors');
+const corsConfig = require('./config/cors');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Habilitar CORS usando la configuración en /config/cors.js
+app.use(cors(corsConfig));
+
+app.use(express.json());
+const routes = require('./routes');
+
 // página principal
-app.get("/", (req, res) => {
+app.get('/', (req, res) => {
   res.send(`
     <html>
       <head>
@@ -33,6 +43,13 @@ app.get("/", (req, res) => {
   `);
 });
 
-app.listen(PORT, () => {
+app.use('/api', routes);
+
+// http server + websocket
+const server = http.createServer(app);
+const ws = require('./utils/ws');
+ws.init(server);
+
+server.listen(PORT, () => {
   console.log(`Servidor corriendo en http://localhost:${PORT}`);
 });
