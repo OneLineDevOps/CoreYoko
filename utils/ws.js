@@ -1,23 +1,32 @@
 'use strict';
-const WebSocket = require('ws');
-let wss = null;
+let io = null;
 
 function init(server) {
-  if (wss) return wss;
-  wss = new WebSocket.Server({ server, path: '/ws' });
-  wss.on('connection', (socket) => {
-    socket.send(JSON.stringify({ type: 'welcome', message: 'connected' }));
-    socket.on('message', () => {});
-  });
-  return wss;
+  if (io) return io;
+  try {
+    const { Server } = require('socket.io');
+    io = new Server(server, { cors: { origin: '*', methods: ['GET', 'POST'] } });
+    io.on('connection', (socket) => {
+      socket.emit('welcome', { message: 'connected' });
+    });
+    return io;
+  } catch (err) {
+    console.error('socket.io init error', err);
+    return null;
+  }
 }
 
-function broadcast(data) {
-  if (!wss) return;
-  const payload = typeof data === 'string' ? data : JSON.stringify(data);
-  wss.clients.forEach((client) => {
-    if (client.readyState === WebSocket.OPEN) client.send(payload);
-  });
+function broadcast(payload) {
+  if (!io) return;
+  try {
+    if (payload && payload.type) {
+      io.emit(payload.type, payload.data || {});
+    } else {
+      io.emit('message', payload);
+    }
+  } catch (err) {
+    console.error('socket.io broadcast error', err);
+  }
 }
 
-module.exports = { init, broadcast };
+module.exports = { init, broadcast, getIO: () => io };

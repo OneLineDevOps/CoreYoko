@@ -10,6 +10,8 @@ const mesas = require('./mesas');
 const categorias = require('./categorias');
 const productos = require('./productos');
 const productoPrecios = require('./producto_precios');
+const modificadores = require('./modificadores');
+const pedidosDetalles = require('./pedidos_detalles');
 
 router.use('/restaurants', restaurants);
 router.use('/pedidos', pedidos);
@@ -20,5 +22,7 @@ router.use('/mesas', mesas);
 router.use('/categorias', categorias);
 router.use('/productos', productos);
 router.use('/producto_precios', productoPrecios);
+router.use('/modificadores', modificadores);
+router.use('/pedidos_detalles', pedidosDetalles);
 
 module.exports = router;
