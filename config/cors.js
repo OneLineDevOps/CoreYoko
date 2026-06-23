@@ -1,7 +1,7 @@
 'use strict';
 require('dotenv').config();
 
-const defaultOrigin = process.env.CORS_ORIGIN || 'http://localhost:5173';
+const defaultOrigin = process.env.CORS_ORIGIN || '*';
 
 let origin;
 if (defaultOrigin === '*') {
