@@ -1,21 +1,87 @@
-let restaurants = [
-  { id: 1, name: 'Demo Restaurant', cuisine: 'Global' }
-];
-let nextId = 2;
+'use strict';
+const db = require('../models/db');
 
-function getAll() {
-  return restaurants;
+function normalizePayload(data = {}) {
+  return {
+    nombre: data.nombre ? String(data.nombre).trim() : '',
+    ruc: data.ruc ? String(data.ruc).trim() : null,
+    direccion: data.direccion ? String(data.direccion).trim() : null,
+    telefono: data.telefono ? String(data.telefono).trim() : null,
+    activo: data.activo === undefined ? 1 : Number(Boolean(data.activo)),
+  };
 }
 
-function getById(id) {
-  const nid = Number(id);
-  return restaurants.find(r => r.id === nid);
+async function getAll({ includeInactive = false } = {}) {
+  const where = includeInactive ? '' : 'WHERE r.activo = 1';
+  const [rows] = await db.query(
+    `SELECT
+       r.*,
+       COUNT(s.id) AS sucursales_count
+     FROM restaurantes r
+     LEFT JOIN sucursales s ON s.restaurante_id = r.id AND s.activo = 1
+     ${where}
+     GROUP BY r.id
+     ORDER BY r.id DESC`
+  );
+  return rows || [];
 }
 
-function create(data) {
-  const r = { id: nextId++, ...data };
-  restaurants.push(r);
-  return r;
+async function getById(id) {
+  const [rows] = await db.query(
+    `SELECT
+       r.*,
+       COUNT(s.id) AS sucursales_count
+     FROM restaurantes r
+     LEFT JOIN sucursales s ON s.restaurante_id = r.id AND s.activo = 1
+     WHERE r.id = ?
+     GROUP BY r.id
+     LIMIT 1`,
+    [id]
+  );
+  return rows && rows.length ? rows[0] : null;
 }
 
-module.exports = { getAll, getById, create };
+async function create(data) {
+  const payload = normalizePayload(data);
+  if (!payload.nombre) {
+    const err = new Error('nombre is required');
+    err.code = 'INVALID_INPUT';
+    throw err;
+  }
+
+  const [res] = await db.pool.execute(
+    `INSERT INTO restaurantes (nombre, ruc, direccion, telefono, activo)
+     VALUES (?, ?, ?, ?, ?)`,
+    [payload.nombre, payload.ruc, payload.direccion, payload.telefono, payload.activo]
+  );
+  return getById(res.insertId);
+}
+
+async function update(id, data) {
+  const current = await getById(id);
+  if (!current) return null;
+
+  const payload = normalizePayload({ ...current, ...data });
+  if (!payload.nombre) {
+    const err = new Error('nombre is required');
+    err.code = 'INVALID_INPUT';
+    throw err;
+  }
+
+  await db.pool.execute(
+    `UPDATE restaurantes
+     SET nombre = ?, ruc = ?, direccion = ?, telefono = ?, activo = ?
+     WHERE id = ?`,
+    [payload.nombre, payload.ruc, payload.direccion, payload.telefono, payload.activo, id]
+  );
+  return getById(id);
+}
+
+async function remove(id) {
+  const current = await getById(id);
+  if (!current) return null;
+  await db.pool.execute('UPDATE restaurantes SET activo = 0 WHERE id = ?', [id]);
+  return { id: Number(id), deleted: true };
+}
+
+module.exports = { getAll, getById, create, update, remove };

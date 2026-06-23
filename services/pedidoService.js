@@ -8,6 +8,18 @@ function generateNumero() {
   return 'P' + Date.now();
 }
 
+async function getPedidoSucursalCode(pedidoId) {
+  const [rows] = await db.query(
+    `SELECT s.codigo
+     FROM pedidos p
+     JOIN sucursales s ON s.id = p.sucursal_id
+     WHERE p.id = ?
+     LIMIT 1`,
+    [pedidoId]
+  );
+  return rows && rows.length ? rows[0].codigo : null;
+}
+
 async function createPedido({ sucursal_id, mesa_id, cliente_id, tipo_pedido, usuario_creacion, detalles = [] }) {
   const conn = await db.getConnection();
   try {
@@ -54,14 +66,24 @@ async function createPedido({ sucursal_id, mesa_id, cliente_id, tipo_pedido, usu
       subtotal += itemSubtotal;
     }
 
-    const igv = Number((subtotal * config.igv).toFixed(2));
-    const total = Number((subtotal + igv).toFixed(2));
-    await conn.execute(`UPDATE pedidos SET subtotal = ?, igv = ?, total = ? WHERE id = ?`, [subtotal.toFixed(2), igv.toFixed(2), total.toFixed(2), pedidoId]);
+    const total = Number(subtotal.toFixed(2));
+    const base = Number((total / (1 + config.igv)).toFixed(2));
+    const igv = Number((total - base).toFixed(2));
+    await conn.execute(`UPDATE pedidos SET subtotal = ?, igv = ?, total = ? WHERE id = ?`, [base.toFixed(2), igv.toFixed(2), total.toFixed(2), pedidoId]);
     await conn.execute(`INSERT INTO historial_estado_pedido (pedido_id, estado, usuario_id, observacion) VALUES (?, ?, ?, ?)`, [pedidoId, 'PENDIENTE', usuario_creacion || null, null]);
     await conn.commit();
 
-    // emitir evento websocket
-    ws.broadcast({ type: 'pedido_nuevo', data: { id: pedidoId, numero, sucursal_id } });
+    try {
+      // emitir evento websocket al canal de la sucursal
+      const sucursalCodigo = await getPedidoSucursalCode(pedidoId);
+      const pedido = await getPedidoById(pedidoId);
+      ws.broadcastToSucursal(sucursalCodigo, {
+        type: 'pedido_nuevo',
+        data: { ...(pedido || {}), id: pedidoId, numero, sucursal_id, sucursal_codigo: sucursalCodigo }
+      });
+    } catch (emitErr) {
+      logger.error('pedido_nuevo websocket error', emitErr);
+    }
 
     return { id: pedidoId, numero };
   } catch (err) {
@@ -74,10 +96,66 @@ async function createPedido({ sucursal_id, mesa_id, cliente_id, tipo_pedido, usu
 }
 
 async function getPedidoById(pedidoId) {
-  const [rows] = await db.query(`SELECT * FROM pedidos WHERE id = ?`, [pedidoId]);
+  const [rows] = await db.query(
+    `SELECT
+       p.*,
+       m.codigo AS mesa_nombre,
+       cli.tipo_documento,
+       cli.numero_documento,
+       cli.razon_social,
+       cli.nombres,
+       cli.apellidos,
+       cli.telefono,
+       cli.correo,
+       cli.direccion,
+       u.usuario AS usuario_creacion_usuario,
+       COALESCE(NULLIF(TRIM(CONCAT(COALESCE(u.nombre, ''), ' ', COALESCE(u.apellido, ''))), ''), u.usuario) AS usuario_creacion_nombre,
+       he.fecha AS estado_fecha
+     FROM pedidos p
+     LEFT JOIN mesas m ON m.id = p.mesa_id
+     LEFT JOIN clientes cli ON cli.id = p.cliente_id
+     LEFT JOIN usuarios u ON u.id = p.usuario_creacion
+     LEFT JOIN (
+       SELECT h1.pedido_id, h1.fecha
+       FROM historial_estado_pedido h1
+       JOIN (
+         SELECT pedido_id, MAX(id) AS max_id
+         FROM historial_estado_pedido
+         GROUP BY pedido_id
+       ) hx ON hx.max_id = h1.id
+     ) he ON he.pedido_id = p.id
+     WHERE p.id = ?`,
+    [pedidoId]
+  );
   if (!rows || rows.length === 0) return null;
   const pedido = rows[0];
-  const [detalles] = await db.query(`SELECT * FROM pedido_detalles WHERE pedido_id = ?`, [pedidoId]);
+  if (pedido.cliente_id) {
+    pedido.cliente = {
+      id: pedido.cliente_id,
+      tipo_documento: pedido.tipo_documento,
+      numero_documento: pedido.numero_documento,
+      razon_social: pedido.razon_social,
+      nombres: pedido.nombres,
+      apellidos: pedido.apellidos,
+      telefono: pedido.telefono,
+      correo: pedido.correo,
+      direccion: pedido.direccion
+    };
+    pedido.cliente_nombre = pedido.razon_social || `${pedido.nombres || ''} ${pedido.apellidos || ''}`.trim();
+  }
+  const [detalles] = await db.query(
+    `SELECT
+       pd.*,
+       p.nombre AS producto_nombre,
+       p.nombre AS descripcion,
+       pp.nombre_precio
+     FROM pedido_detalles pd
+     LEFT JOIN productos p ON p.id = pd.producto_id
+     LEFT JOIN producto_precios pp ON pp.id = pd.producto_precio_id
+     WHERE pd.pedido_id = ?
+     ORDER BY pd.id`,
+    [pedidoId]
+  );
   for (const det of detalles) {
     const [mods] = await db.query(`SELECT pdm.*, om.nombre as opcion_nombre FROM pedido_detalle_modificadores pdm LEFT JOIN opciones_modificador om ON pdm.opcion_modificador_id = om.id WHERE pdm.pedido_detalle_id = ?`, [det.id]);
     det.modificadores = mods || [];
@@ -87,13 +165,38 @@ async function getPedidoById(pedidoId) {
 }
 
 async function listPedidosBySucursal(sucursal_id, estado) {
-  let sql = `SELECT * FROM pedidos WHERE sucursal_id = ?`;
+  let sql = `SELECT
+      p.*,
+      m.codigo AS mesa_nombre,
+      cli.razon_social,
+      cli.nombres,
+      cli.apellidos,
+      COALESCE(cli.razon_social, TRIM(CONCAT(COALESCE(cli.nombres, ''), ' ', COALESCE(cli.apellidos, '')))) AS cliente_nombre,
+      u.usuario AS usuario_creacion_usuario,
+      COALESCE(NULLIF(TRIM(CONCAT(COALESCE(u.nombre, ''), ' ', COALESCE(u.apellido, ''))), ''), u.usuario) AS usuario_creacion_nombre,
+      he.fecha AS estado_fecha
+    FROM pedidos p
+    LEFT JOIN mesas m ON m.id = p.mesa_id
+    LEFT JOIN clientes cli ON cli.id = p.cliente_id
+    LEFT JOIN usuarios u ON u.id = p.usuario_creacion
+    LEFT JOIN (
+      SELECT h1.pedido_id, h1.fecha
+      FROM historial_estado_pedido h1
+      JOIN (
+        SELECT pedido_id, MAX(id) AS max_id
+        FROM historial_estado_pedido
+        GROUP BY pedido_id
+      ) hx ON hx.max_id = h1.id
+    ) he ON he.pedido_id = p.id
+    WHERE p.sucursal_id = ?`;
   const params = [sucursal_id];
   if (estado) {
-    sql += ` AND estado = ?`;
+    sql += ` AND p.estado = ?`;
     params.push(estado);
+  } else {
+    sql += ` AND p.estado <> 'ANULADO'`;
   }
-  sql += ` ORDER BY fecha_pedido DESC LIMIT 100`;
+  sql += ` ORDER BY p.fecha_pedido DESC LIMIT 100`;
   const [rows] = await db.query(sql, params);
   return rows;
 }
@@ -104,10 +207,24 @@ async function updatePedidoEstado(pedidoId, nuevoEstado, usuarioId, observacion)
     await conn.beginTransaction();
     await conn.execute(`UPDATE pedidos SET estado = ? WHERE id = ?`, [nuevoEstado, pedidoId]);
     await conn.execute(`INSERT INTO historial_estado_pedido (pedido_id, estado, usuario_id, observacion) VALUES (?, ?, ?, ?)`, [pedidoId, nuevoEstado, usuarioId || null, observacion || null]);
+    if (nuevoEstado === 'ENTREGADO' || nuevoEstado === 'ANULADO') {
+      await conn.execute(
+        `UPDATE mesas m
+         JOIN pedidos p ON p.mesa_id = m.id
+         SET m.estado = 'LIBRE'
+         WHERE p.id = ? AND m.estado <> 'RESERVADA'`,
+        [pedidoId]
+      );
+    }
     await conn.commit();
 
-    // emitir evento websocket
-    ws.broadcast({ type: 'pedido_estado', data: { id: pedidoId, estado: nuevoEstado } });
+    try {
+      // emitir evento websocket al canal de la sucursal
+      const sucursalCodigo = await getPedidoSucursalCode(pedidoId);
+      ws.broadcastToSucursal(sucursalCodigo, { type: 'pedido_estado', data: { id: pedidoId, estado: nuevoEstado, sucursal_codigo: sucursalCodigo } });
+    } catch (emitErr) {
+      logger.error('pedido_estado websocket error', emitErr);
+    }
 
     return true;
   } catch (err) {
@@ -161,13 +278,23 @@ async function updatePedidoDetalles(pedidoId, detalles = []) {
       subtotal += itemSubtotal;
     }
 
-    const igv = Number((subtotal * config.igv).toFixed(2));
-    const total = Number((subtotal + igv).toFixed(2));
-    await conn.execute(`UPDATE pedidos SET subtotal = ?, igv = ?, total = ? WHERE id = ?`, [subtotal.toFixed(2), igv.toFixed(2), total.toFixed(2), pedidoId]);
+    const total = Number(subtotal.toFixed(2));
+    const base = Number((total / (1 + config.igv)).toFixed(2));
+    const igv = Number((total - base).toFixed(2));
+    await conn.execute(`UPDATE pedidos SET subtotal = ?, igv = ?, total = ? WHERE id = ?`, [base.toFixed(2), igv.toFixed(2), total.toFixed(2), pedidoId]);
     await conn.commit();
 
-    // emitir evento websocket de actualización
-    ws.broadcast({ type: 'pedido_actualizado', data: { id: pedidoId } });
+    try {
+      // emitir evento websocket de actualización al canal de la sucursal
+      const sucursalCodigo = await getPedidoSucursalCode(pedidoId);
+      const pedido = await getPedidoById(pedidoId);
+      ws.broadcastToSucursal(sucursalCodigo, {
+        type: 'pedido_actualizado',
+        data: { ...(pedido || {}), id: pedidoId, sucursal_codigo: sucursalCodigo }
+      });
+    } catch (emitErr) {
+      logger.error('pedido_actualizado websocket error', emitErr);
+    }
 
     return true;
   } catch (err) {
@@ -180,4 +307,3 @@ async function updatePedidoDetalles(pedidoId, detalles = []) {
 }
 
 module.exports = { createPedido, getPedidoById, listPedidosBySucursal, updatePedidoEstado, updatePedidoDetalles };
-

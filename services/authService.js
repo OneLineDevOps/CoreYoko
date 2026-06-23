@@ -8,6 +8,21 @@ const JWT_SECRET = process.env.JWT_SECRET || 'change_this_secret';
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '1h';
 const SALT_ROUNDS = parseInt(process.env.SALT_ROUNDS || '10', 10);
 
+async function getUserRoles(userId) {
+  const [rows] = await db.query(
+    `SELECT r.id, r.nombre
+     FROM usuario_roles ur
+     JOIN roles r ON r.id = ur.rol_id
+     WHERE ur.usuario_id = ?
+     ORDER BY r.id`,
+    [userId]
+  );
+  return (rows || []).map((r) => ({
+    id: r.id,
+    nombre: String(r.nombre || '').trim().toUpperCase()
+  })).filter((r) => r.nombre);
+}
+
 async function register({ nombre, apellido, usuario, correo, password }) {
   if (!nombre || !usuario || !password) {
     const e = new Error('nombre, usuario y password son requeridos');
@@ -40,7 +55,7 @@ async function login({ username, password }) {
     throw e;
   }
 
-  const [rows] = await db.query(`SELECT * FROM usuarios WHERE (usuario = ?) LIMIT 1`, [username, username]);
+  const [rows] = await db.query(`SELECT * FROM usuarios WHERE usuario = ? LIMIT 1`, [username]);
   if (!rows || rows.length === 0) {
     const e = new Error('Credenciales inválidas');
     e.code = 'INVALID_CREDENTIALS';
@@ -55,9 +70,18 @@ async function login({ username, password }) {
     throw e;
   }
 
-  const payload = { sub: user.id, usuario: user.usuario, nombre: user.nombre, restaurante_id: user.restaurante_id };
+  const roles = await getUserRoles(user.id);
+  const roleNames = roles.map((r) => r.nombre);
+  const payload = {
+    sub: user.id,
+    usuario: user.usuario,
+    nombre: user.nombre,
+    restaurante_id: user.restaurante_id,
+    roles: roleNames,
+    role: roleNames[0] || null
+  };
   const token = jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
-  return { token, user: { id: user.id, nombre: user.nombre, apellido: user.apellido, usuario: user.usuario, restaurante_id: user.restaurante_id, activo: user.activo } };
+  return { token, user: { id: user.id, nombre: user.nombre, apellido: user.apellido, usuario: user.usuario, restaurante_id: user.restaurante_id, activo: user.activo, roles } };
 }
 
 async function verifyToken(token) {
@@ -65,10 +89,12 @@ async function verifyToken(token) {
     const data = jwt.verify(token, JWT_SECRET);
     const [rows] = await db.query(`SELECT id, nombre, apellido, usuario, restaurante_id, activo FROM usuarios WHERE id = ? LIMIT 1`, [data.sub]);
     if (!rows || rows.length === 0) return null;
-    return rows[0];
+    const user = rows[0];
+    const roles = await getUserRoles(user.id);
+    return { ...user, roles, role_names: roles.map((r) => r.nombre) };
   } catch (err) {
     return null;
   }
 }
 
-module.exports = { register, login, verifyToken };
+module.exports = { register, login, verifyToken, getUserRoles };

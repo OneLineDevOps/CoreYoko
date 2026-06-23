@@ -6,10 +6,18 @@ const defaultOrigin = process.env.CORS_ORIGIN || 'http://localhost:5173';
 let origin;
 if (defaultOrigin === '*') {
   origin = '*';
-} else if (defaultOrigin.includes(',')) {
-  origin = defaultOrigin.split(',').map(s => s.trim());
 } else {
-  origin = defaultOrigin;
+  const configuredOrigins = defaultOrigin
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+  origin = (requestOrigin, callback) => {
+    if (!requestOrigin) return callback(null, true);
+
+    const isConfigured = configuredOrigins.includes(requestOrigin);
+    const isLocalDevelopment = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(requestOrigin);
+    callback(null, isConfigured || isLocalDevelopment);
+  };
 }
 
 const methods = (process.env.CORS_METHODS || 'GET,HEAD,PUT,PATCH,POST,DELETE')

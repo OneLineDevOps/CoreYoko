@@ -1,8 +1,9 @@
 const express = require('express');
 const router = express.Router();
 const pedidoService = require('../services/pedidoService');
+const optionalAuth = require('../middleware/optionalAuthMiddleware');
 
-router.put('/:id', async (req, res) => {
+router.put('/:id', optionalAuth, async (req, res) => {
   try {
     const pedidoId = req.params.id;
     const { detalles } = req.body;

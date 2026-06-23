@@ -3,7 +3,10 @@ const pedidoService = require('../services/pedidoService');
 
 async function create(req, res) {
   try {
-    const payload = req.body;
+    const payload = {
+      ...req.body,
+      usuario_creacion: req.user?.id || req.body.usuario_creacion || null
+    };
     const result = await pedidoService.createPedido(payload);
     res.status(201).json(result);
   } catch (err) {
@@ -41,7 +44,7 @@ async function updateEstado(req, res) {
     const pedidoId = req.params.id;
     const { estado, usuario_id, observacion } = req.body;
     if (!estado) return res.status(400).json({ error: 'estado is required' });
-    await pedidoService.updatePedidoEstado(pedidoId, estado, usuario_id, observacion);
+    await pedidoService.updatePedidoEstado(pedidoId, estado, req.user?.id || usuario_id, observacion);
     res.json({ ok: true });
   } catch (err) {
     console.error(err);
