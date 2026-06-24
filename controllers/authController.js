@@ -31,4 +31,34 @@ async function me(req, res) {
   res.json(req.user || null);
 }
 
-module.exports = { register, login, me };
+async function updateMe(req, res) {
+  try {
+    const result = await authService.updateProfile(req.user.id, req.body);
+    if (!result) return res.status(404).json({ error: 'Usuario no encontrado' });
+    res.json(result);
+  } catch (err) {
+    if (err.code === 'DUPLICATE') return res.status(409).json({ error: err.message });
+    if (err.code === 'INVALID_INPUT') return res.status(400).json({ error: err.message });
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+async function changePassword(req, res) {
+  try {
+    const result = await authService.changePassword(
+      req.user.id,
+      req.body.current_password,
+      req.body.new_password
+    );
+    if (!result) return res.status(404).json({ error: 'Usuario no encontrado' });
+    res.json(result);
+  } catch (err) {
+    if (err.code === 'INVALID_CREDENTIALS') return res.status(400).json({ error: err.message });
+    if (err.code === 'INVALID_INPUT') return res.status(400).json({ error: err.message });
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+module.exports = { register, login, me, updateMe, changePassword };
