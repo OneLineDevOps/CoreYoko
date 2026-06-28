@@ -108,7 +108,7 @@ async function getSummary(sessionId) {
        p.*,
        mp.nombre AS metodo_pago,
        ped.numero AS pedido_numero,
-       m.codigo AS mesa_codigo,
+       COALESCE(m.codigo, ped.mesa_temporal_codigo) AS mesa_codigo,
        COALESCE(cli.razon_social, TRIM(CONCAT(COALESCE(cli.nombres, ''), ' ', COALESCE(cli.apellidos, '')))) AS cliente_nombre,
        u.usuario AS usuario_usuario,
        COALESCE(NULLIF(TRIM(CONCAT(COALESCE(u.nombre, ''), ' ', COALESCE(u.apellido, ''))), ''), u.usuario) AS usuario_nombre

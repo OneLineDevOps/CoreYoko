@@ -1,6 +1,9 @@
 const express = require('express');
+const { randomUUID } = require('crypto');
 const router = express.Router();
 const comprobanteService = require('../services/comprobanteService');
+const trabajoImpresionService = require('../services/trabajoImpresionService');
+const auth = require('../middleware/authMiddleware');
 const optionalAuth = require('../middleware/optionalAuthMiddleware');
 
 router.post('/', optionalAuth, async (req, res) => {
@@ -52,6 +55,34 @@ router.get('/:id/pdf', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).send('Internal server error');
+  }
+});
+
+router.post('/:id/imprimir-red', auth, async (req, res) => {
+  try {
+    const comprobante = await comprobanteService.getById(req.params.id);
+    if (!comprobante) return res.status(404).json({ error: 'Comprobante no encontrado' });
+
+    const isRoot = (req.user?.role_names || []).includes('ROOT');
+    if (!isRoot && Number(comprobante.restaurante_id) !== Number(req.user?.restaurante_id)) {
+      return res.status(403).json({ error: 'Comprobante fuera de su restaurante' });
+    }
+
+    const jobs = await trabajoImpresionService.enqueueReceipt(comprobante, {
+      idempotencyKey: `REIMPRESION:${comprobante.id}:${randomUUID()}`,
+    });
+    if (!jobs.length) {
+      return res.status(409).json({
+        error: 'No existe una impresora activa con el propósito CAJA en esta sucursal',
+      });
+    }
+    res.status(201).json({
+      message: 'Impresión en red enviada a la cola',
+      trabajos: jobs,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'No se pudo enviar la impresión en red' });
   }
 });
 

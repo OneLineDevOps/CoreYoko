@@ -3,9 +3,66 @@ const db = require('../models/db');
 const config = require('../config/db');
 const logger = require('../utils/logger');
 const ws = require('../utils/ws');
+const trabajoImpresionService = require('./trabajoImpresionService');
 
 function generateNumero() {
   return 'P' + Date.now();
+}
+
+function normalizeMesaTemporalCodigo(value) {
+  if (value === undefined || value === null) return null;
+  const codigo = String(value).trim().replace(/\s+/g, ' ');
+  if (!codigo) return null;
+  if (codigo.length > 20) {
+    const err = new Error('El nombre de la mesa temporal admite hasta 20 caracteres');
+    err.code = 'VALIDATION_ERROR';
+    throw err;
+  }
+  return codigo;
+}
+
+async function reserveMesaTemporalCodigo(conn, sucursalId, requestedCode = null, pedidoId = null) {
+  const lockName = `mesa-temporal-${sucursalId}`;
+  const [lockRows] = await conn.query('SELECT GET_LOCK(?, 5) AS acquired', [lockName]);
+  if (!lockRows?.[0] || Number(lockRows[0].acquired) !== 1) {
+    const err = new Error('No se pudo reservar un código de mesa temporal');
+    err.code = 'TEMPORAL_CODE_LOCK';
+    throw err;
+  }
+
+  if (requestedCode) {
+    const [duplicates] = await conn.execute(
+      `SELECT id
+       FROM pedidos
+       WHERE sucursal_id = ?
+         AND mesa_temporal_codigo = ?
+         AND estado NOT IN ('ENTREGADO', 'ANULADO')
+         AND (? IS NULL OR id <> ?)
+       LIMIT 1`,
+      [sucursalId, requestedCode, pedidoId, pedidoId]
+    );
+    if (duplicates?.length) {
+      await conn.query('SELECT RELEASE_LOCK(?)', [lockName]);
+      const err = new Error(`Ya existe una mesa temporal abierta con el nombre "${requestedCode}"`);
+      err.code = 'VALIDATION_ERROR';
+      throw err;
+    }
+    return { codigo: requestedCode, lockName };
+  }
+
+  const [rows] = await conn.execute(
+    `SELECT COALESCE(MAX(CAST(SUBSTRING(mesa_temporal_codigo, 3) AS UNSIGNED)), 0) + 1 AS correlativo
+     FROM pedidos
+     WHERE sucursal_id = ?
+       AND DATE(fecha_pedido) = CURDATE()
+       AND mesa_temporal_codigo REGEXP '^T-[0-9]+$'`,
+    [sucursalId]
+  );
+  const correlativo = Number(rows?.[0]?.correlativo || 1);
+  return {
+    codigo: `T-${String(correlativo).padStart(3, '0')}`,
+    lockName
+  };
 }
 
 async function getPedidoSucursalCode(pedidoId) {
@@ -20,15 +77,52 @@ async function getPedidoSucursalCode(pedidoId) {
   return rows && rows.length ? rows[0].codigo : null;
 }
 
-async function createPedido({ sucursal_id, mesa_id, cliente_id, tipo_pedido, usuario_creacion, detalles = [] }) {
+async function createPedido({
+  sucursal_id,
+  mesa_id,
+  mesa_temporal,
+  mesa_temporal_codigo,
+  cliente_id,
+  tipo_pedido,
+  usuario_creacion,
+  detalles = []
+}) {
+  if (!sucursal_id) {
+    const err = new Error('sucursal_id is required');
+    err.code = 'VALIDATION_ERROR';
+    throw err;
+  }
+  if (!mesa_id && !mesa_temporal && tipo_pedido === 'MESA') {
+    const err = new Error('Seleccione una mesa física o temporal');
+    err.code = 'VALIDATION_ERROR';
+    throw err;
+  }
+
   const conn = await db.getConnection();
+  let temporalLockName = null;
   try {
     await conn.beginTransaction();
     const numero = generateNumero();
+    let mesaTemporalCodigo = null;
+    if (mesa_temporal) {
+      const requestedCode = normalizeMesaTemporalCodigo(mesa_temporal_codigo);
+      const temporal = await reserveMesaTemporalCodigo(conn, sucursal_id, requestedCode);
+      mesaTemporalCodigo = temporal.codigo;
+      temporalLockName = temporal.lockName;
+    }
     const [res] = await conn.execute(
-      `INSERT INTO pedidos (numero, sucursal_id, mesa_id, cliente_id, tipo_pedido, usuario_creacion)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [numero, sucursal_id, mesa_id || null, cliente_id || null, tipo_pedido, usuario_creacion || null]
+      `INSERT INTO pedidos
+       (numero, sucursal_id, mesa_id, mesa_temporal_codigo, cliente_id, tipo_pedido, usuario_creacion)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        numero,
+        sucursal_id,
+        mesa_temporal ? null : (mesa_id || null),
+        mesaTemporalCodigo,
+        cliente_id || null,
+        tipo_pedido,
+        usuario_creacion || null
+      ]
     );
     const pedidoId = res.insertId;
     let subtotal = 0;
@@ -81,16 +175,24 @@ async function createPedido({ sucursal_id, mesa_id, cliente_id, tipo_pedido, usu
         type: 'pedido_nuevo',
         data: { ...(pedido || {}), id: pedidoId, numero, sucursal_id, sucursal_codigo: sucursalCodigo }
       });
+      await trabajoImpresionService.enqueueOrder(pedido, 'NUEVO');
     } catch (emitErr) {
       logger.error('pedido_nuevo websocket error', emitErr);
     }
 
-    return { id: pedidoId, numero };
+    return { id: pedidoId, numero, mesa_temporal_codigo: mesaTemporalCodigo };
   } catch (err) {
     await conn.rollback();
     logger.error('createPedido error', err);
     throw err;
   } finally {
+    if (temporalLockName) {
+      try {
+        await conn.query('SELECT RELEASE_LOCK(?)', [temporalLockName]);
+      } catch (releaseErr) {
+        logger.error('release mesa temporal lock error', releaseErr);
+      }
+    }
     conn.release();
   }
 }
@@ -99,7 +201,7 @@ async function getPedidoById(pedidoId) {
   const [rows] = await db.query(
     `SELECT
        p.*,
-       m.codigo AS mesa_nombre,
+       COALESCE(m.codigo, p.mesa_temporal_codigo) AS mesa_nombre,
        cli.tipo_documento,
        cli.numero_documento,
        cli.razon_social,
@@ -167,7 +269,7 @@ async function getPedidoById(pedidoId) {
 async function listPedidosBySucursal(sucursal_id, estado) {
   let sql = `SELECT
       p.*,
-      m.codigo AS mesa_nombre,
+      COALESCE(m.codigo, p.mesa_temporal_codigo) AS mesa_nombre,
       cli.razon_social,
       cli.nombres,
       cli.apellidos,
@@ -236,10 +338,44 @@ async function updatePedidoEstado(pedidoId, nuevoEstado, usuarioId, observacion)
   }
 }
 
-async function updatePedidoDetalles(pedidoId, detalles = []) {
+async function updatePedidoDetalles(pedidoId, detalles = [], mesaTemporalCodigoInput = undefined) {
   const conn = await db.getConnection();
+  let temporalLockName = null;
   try {
     await conn.beginTransaction();
+    if (mesaTemporalCodigoInput !== undefined) {
+      const [pedidoRows] = await conn.execute(
+        `SELECT id, sucursal_id, mesa_temporal_codigo
+         FROM pedidos
+         WHERE id = ?
+         LIMIT 1
+         FOR UPDATE`,
+        [pedidoId]
+      );
+      const pedido = pedidoRows?.[0];
+      if (!pedido) {
+        const err = new Error('Pedido no encontrado');
+        err.code = 'NOT_FOUND';
+        throw err;
+      }
+      if (!pedido.mesa_temporal_codigo) {
+        const err = new Error('El pedido no corresponde a una mesa temporal');
+        err.code = 'VALIDATION_ERROR';
+        throw err;
+      }
+      const requestedCode = normalizeMesaTemporalCodigo(mesaTemporalCodigoInput);
+      const temporal = await reserveMesaTemporalCodigo(
+        conn,
+        pedido.sucursal_id,
+        requestedCode,
+        pedido.id
+      );
+      temporalLockName = temporal.lockName;
+      await conn.execute(
+        'UPDATE pedidos SET mesa_temporal_codigo = ? WHERE id = ?',
+        [temporal.codigo, pedidoId]
+      );
+    }
     // Simple approach: eliminar detalles antiguos y reinsertar
     await conn.execute(`DELETE FROM pedido_detalle_modificadores WHERE pedido_detalle_id IN (SELECT id FROM pedido_detalles WHERE pedido_id = ?)`, [pedidoId]);
     await conn.execute(`DELETE FROM pedido_detalles WHERE pedido_id = ?`, [pedidoId]);
@@ -292,6 +428,7 @@ async function updatePedidoDetalles(pedidoId, detalles = []) {
         type: 'pedido_actualizado',
         data: { ...(pedido || {}), id: pedidoId, sucursal_codigo: sucursalCodigo }
       });
+      await trabajoImpresionService.enqueueOrder(pedido, 'ACTUALIZADO');
     } catch (emitErr) {
       logger.error('pedido_actualizado websocket error', emitErr);
     }
@@ -302,6 +439,13 @@ async function updatePedidoDetalles(pedidoId, detalles = []) {
     logger.error('updatePedidoDetalles error', err);
     throw err;
   } finally {
+    if (temporalLockName) {
+      try {
+        await conn.query('SELECT RELEASE_LOCK(?)', [temporalLockName]);
+      } catch (releaseErr) {
+        logger.error('release mesa temporal update lock error', releaseErr);
+      }
+    }
     conn.release();
   }
 }

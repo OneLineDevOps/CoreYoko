@@ -1,0 +1,61 @@
+CREATE TABLE IF NOT EXISTS impresoras (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  sucursal_id BIGINT UNSIGNED NOT NULL,
+  agente_id VARCHAR(64) DEFAULT NULL,
+  agente_nombre VARCHAR(100) DEFAULT NULL,
+  nombre VARCHAR(120) NOT NULL,
+  ip VARCHAR(45) NOT NULL,
+  puerto INT NOT NULL DEFAULT 9100,
+  protocolo ENUM('RAW9100','LPD','IPP') NOT NULL DEFAULT 'RAW9100',
+  mac VARCHAR(32) DEFAULT NULL,
+  modelo VARCHAR(150) DEFAULT NULL,
+  estado ENUM('ACTIVA','INACTIVA','ERROR') NOT NULL DEFAULT 'INACTIVA',
+  ultimo_error VARCHAR(500) DEFAULT NULL,
+  ultima_conexion DATETIME DEFAULT NULL,
+  origen ENUM('DETECTADA','MANUAL') NOT NULL DEFAULT 'DETECTADA',
+  activo TINYINT(1) NOT NULL DEFAULT 1,
+  created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_impresora_endpoint (sucursal_id, ip, puerto),
+  KEY idx_impresora_agente (agente_id),
+  KEY idx_impresora_estado (sucursal_id, estado, activo),
+  CONSTRAINT fk_impresora_sucursal FOREIGN KEY (sucursal_id) REFERENCES sucursales (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS impresora_propositos (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  impresora_id BIGINT UNSIGNED NOT NULL,
+  proposito ENUM('CAJA','COCINA','BAR','DELIVERY') NOT NULL,
+  activo TINYINT(1) NOT NULL DEFAULT 1,
+  created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_impresora_proposito (impresora_id, proposito),
+  CONSTRAINT fk_proposito_impresora FOREIGN KEY (impresora_id) REFERENCES impresoras (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS trabajos_impresion (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  sucursal_id BIGINT UNSIGNED NOT NULL,
+  impresora_id BIGINT UNSIGNED NOT NULL,
+  proposito ENUM('CAJA','COCINA','BAR','DELIVERY') NOT NULL,
+  tipo VARCHAR(50) NOT NULL,
+  referencia_tipo VARCHAR(30) DEFAULT NULL,
+  referencia_id BIGINT UNSIGNED DEFAULT NULL,
+  clave_idempotencia VARCHAR(160) NOT NULL,
+  contenido LONGTEXT NOT NULL,
+  estado ENUM('PENDIENTE','ENVIADO','IMPRESO','ERROR') NOT NULL DEFAULT 'PENDIENTE',
+  intentos INT NOT NULL DEFAULT 0,
+  max_intentos INT NOT NULL DEFAULT 5,
+  error_mensaje VARCHAR(1000) DEFAULT NULL,
+  fecha_creacion DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  fecha_envio DATETIME DEFAULT NULL,
+  fecha_impresion DATETIME DEFAULT NULL,
+  updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_trabajo_idempotencia (impresora_id, clave_idempotencia),
+  KEY idx_trabajo_cola (impresora_id, estado, intentos),
+  KEY idx_trabajo_sucursal (sucursal_id, fecha_creacion),
+  CONSTRAINT fk_trabajo_sucursal FOREIGN KEY (sucursal_id) REFERENCES sucursales (id),
+  CONSTRAINT fk_trabajo_impresora FOREIGN KEY (impresora_id) REFERENCES impresoras (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

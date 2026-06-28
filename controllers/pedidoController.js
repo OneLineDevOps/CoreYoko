@@ -11,6 +11,12 @@ async function create(req, res) {
     res.status(201).json(result);
   } catch (err) {
     console.error(err);
+    if (err.code === 'VALIDATION_ERROR') {
+      return res.status(400).json({ error: err.message });
+    }
+    if (err.code === 'TEMPORAL_CODE_LOCK') {
+      return res.status(503).json({ error: err.message });
+    }
     res.status(500).json({ error: 'Internal server error' });
   }
 }

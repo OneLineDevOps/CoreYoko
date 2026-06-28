@@ -40,8 +40,15 @@ async function attachRoles(users) {
   return users;
 }
 
-async function list({ includeInactive = true } = {}) {
-  const where = includeInactive ? '' : 'WHERE u.activo = 1';
+async function list({ includeInactive = true, restauranteId = null } = {}) {
+  const filters = [];
+  const params = [];
+  if (!includeInactive) filters.push('u.activo = 1');
+  if (restauranteId) {
+    filters.push('u.restaurante_id = ?');
+    params.push(restauranteId);
+  }
+  const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
   const [rows] = await db.query(
     `SELECT
        u.id, u.nombre, u.apellido, u.usuario, u.correo, u.restaurante_id, u.activo,
@@ -50,7 +57,8 @@ async function list({ includeInactive = true } = {}) {
      FROM usuarios u
      LEFT JOIN restaurantes r ON r.id = u.restaurante_id
      ${where}
-     ORDER BY u.id DESC`
+     ORDER BY u.id DESC`,
+    params
   );
   return attachRoles(rows || []);
 }
@@ -83,6 +91,11 @@ async function create(data) {
   const payload = normalizeUser(data);
   if (!payload.nombre || !payload.usuario || !data.password) {
     const err = new Error('nombre, usuario y password son requeridos');
+    err.code = 'INVALID_INPUT';
+    throw err;
+  }
+  if (String(data.password).length < 6) {
+    const err = new Error('password debe tener al menos 6 caracteres');
     err.code = 'INVALID_INPUT';
     throw err;
   }

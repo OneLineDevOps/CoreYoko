@@ -3,6 +3,7 @@ const db = require('../models/db');
 const config = require('../config/db');
 const PDFDocument = require('pdfkit');
 const cajaService = require('./cajaService');
+const trabajoImpresionService = require('./trabajoImpresionService');
 
 function money(value) {
   return Number(Number(value || 0).toFixed(2));
@@ -45,35 +46,91 @@ async function getCuentaDetalles(cuentaId, conn = db.pool) {
 }
 
 async function nextSerie(tipo, restauranteId, conn) {
-  const [rows] = await conn.execute(
-    `SELECT * FROM series_comprobante
-     WHERE tipo = ? AND restaurante_id = ? AND activo = 1
-     ORDER BY id
-     LIMIT 1
-     FOR UPDATE`,
-    [tipo, restauranteId]
-  );
-
-  if (rows && rows.length) {
-    const serie = rows[0];
-    const numero = Number(serie.ultimo_numero || 0) + 1;
-    await conn.execute('UPDATE series_comprobante SET ultimo_numero = ? WHERE id = ?', [numero, serie.id]);
-    return { serie: serie.serie, numero };
+  const seriesPrefix = tipo === 'FACTURA'
+    ? 'F'
+    : tipo === 'BOLETA'
+      ? 'B'
+      : tipo === 'NOTA_CREDITO'
+        ? 'NC'
+        : 'NP';
+  const lockName = `serie-comprobante-${tipo}`;
+  const [lockRows] = await conn.query('SELECT GET_LOCK(?, 5) AS acquired', [lockName]);
+  if (!lockRows?.[0] || Number(lockRows[0].acquired) !== 1) {
+    const err = new Error('No se pudo reservar la numeración del comprobante');
+    err.code = 'SERIE_LOCK';
+    throw err;
   }
 
-  const prefix = tipo === 'FACTURA' ? 'F001' : tipo === 'BOLETA' ? 'B001' : tipo === 'NOTA_CREDITO' ? 'NC001' : 'NP001';
-  const [res] = await conn.execute(
-    'INSERT INTO series_comprobante (restaurante_id, tipo, serie, ultimo_numero, activo) VALUES (?, ?, ?, 1, 1)',
-    [restauranteId, tipo, prefix]
-  );
-  return { id: res.insertId, serie: prefix, numero: 1 };
+  try {
+    const [rows] = await conn.execute(
+      `SELECT * FROM series_comprobante
+       WHERE tipo = ? AND restaurante_id = ? AND activo = 1
+       ORDER BY id
+       LIMIT 1
+       FOR UPDATE`,
+      [tipo, restauranteId]
+    );
+
+    let serie = rows?.[0] || null;
+    if (!serie) {
+      const [numberRows] = await conn.execute(
+        `SELECT COALESCE(
+           MAX(CAST(SUBSTRING(serie, ?) AS UNSIGNED)),
+           0
+         ) + 1 AS siguiente
+         FROM series_comprobante
+         WHERE tipo = ? AND serie REGEXP ?`,
+        [
+          seriesPrefix.length + 1,
+          tipo,
+          `^${seriesPrefix}[0-9]{3}$`
+        ]
+      );
+      const sequence = Number(numberRows?.[0]?.siguiente || 1);
+      const serieCode = `${seriesPrefix}${String(sequence).padStart(3, '0')}`;
+      const [res] = await conn.execute(
+        `INSERT INTO series_comprobante
+         (restaurante_id, tipo, serie, ultimo_numero, activo)
+         VALUES (?, ?, ?, 0, 1)`,
+        [restauranteId, tipo, serieCode]
+      );
+      serie = {
+        id: res.insertId,
+        restaurante_id: restauranteId,
+        tipo,
+        serie: serieCode,
+        ultimo_numero: 0
+      };
+    }
+
+    const [usedRows] = await conn.execute(
+      `SELECT COALESCE(MAX(numero), 0) AS ultimo_emitido
+       FROM comprobantes
+       WHERE tipo = ? AND serie = ?`,
+      [tipo, serie.serie]
+    );
+    const numero = Math.max(
+      Number(serie.ultimo_numero || 0),
+      Number(usedRows?.[0]?.ultimo_emitido || 0)
+    ) + 1;
+    await conn.execute(
+      'UPDATE series_comprobante SET ultimo_numero = ? WHERE id = ?',
+      [numero, serie.id]
+    );
+    return { id: serie.id, serie: serie.serie, numero };
+  } finally {
+    try {
+      await conn.query('SELECT RELEASE_LOCK(?)', [lockName]);
+    } catch (releaseErr) {
+      console.error('No se pudo liberar el bloqueo de serie', releaseErr);
+    }
+  }
 }
 
-async function create({ cuenta_id, cliente_id, tipo = 'BOLETA', metodo_pago_id = null, sesion_caja_id = null }) {
-  const conn = await db.getConnection();
-  try {
-    await conn.beginTransaction();
-
+async function createWithConnection(
+  { cuenta_id, cliente_id, tipo = 'BOLETA', metodo_pago_id = null, sesion_caja_id = null },
+  conn
+) {
     const cuenta = await getCuentaContext(cuenta_id, conn);
     if (!cuenta) {
       const err = new Error('Cuenta no encontrada');
@@ -144,8 +201,22 @@ async function create({ cuenta_id, cliente_id, tipo = 'BOLETA', metodo_pago_id =
     }
 
     await conn.execute('UPDATE cuentas SET estado = "FACTURADA", total = ? WHERE id = ?', [total.toFixed(2), cuenta_id]);
+    return { id: comprobanteId };
+}
+
+async function create(payload) {
+  const conn = await db.getConnection();
+  try {
+    await conn.beginTransaction();
+    const created = await createWithConnection(payload, conn);
     await conn.commit();
-    return getById(comprobanteId);
+    const receipt = await getById(created.id);
+    try {
+      await trabajoImpresionService.enqueueReceipt(receipt);
+    } catch (printError) {
+      console.error('No se pudo encolar el comprobante', printError);
+    }
+    return receipt;
   } catch (err) {
     await conn.rollback();
     throw err;
@@ -156,8 +227,8 @@ async function create({ cuenta_id, cliente_id, tipo = 'BOLETA', metodo_pago_id =
 
 async function getById(id) {
   const [rows] = await db.query(
-    `SELECT comp.*, c.pedido_id, p.numero AS pedido_numero, p.mesa_id,
-            m.codigo AS mesa_codigo,
+    `SELECT comp.*, c.pedido_id, p.numero AS pedido_numero, p.mesa_id, p.sucursal_id,
+            COALESCE(m.codigo, p.mesa_temporal_codigo) AS mesa_codigo,
             (
               SELECT pg.sesion_caja_id
               FROM pagos pg
@@ -167,7 +238,8 @@ async function getById(id) {
               LIMIT 1
             ) AS sesion_caja_id,
             s.nombre AS sucursal_nombre, s.direccion AS sucursal_direccion, s.telefono AS sucursal_telefono,
-            r.nombre AS restaurante_nombre, r.ruc AS restaurante_ruc, r.direccion AS restaurante_direccion, r.telefono AS restaurante_telefono,
+            r.id AS restaurante_id, r.nombre AS restaurante_nombre, r.ruc AS restaurante_ruc,
+            r.direccion AS restaurante_direccion, r.telefono AS restaurante_telefono,
             cli.tipo_documento, cli.numero_documento, cli.razon_social, cli.nombres, cli.apellidos
      FROM comprobantes comp
      LEFT JOIN cuentas c ON c.id = comp.cuenta_id
@@ -295,4 +367,4 @@ function generatePdfBuffer(comprobante) {
   });
 }
 
-module.exports = { create, getById, renderPrintText, generatePdfBuffer };
+module.exports = { create, createWithConnection, nextSerie, getById, renderPrintText, generatePdfBuffer };

@@ -26,4 +26,21 @@ router.post('/', optionalAuth, async (req, res) => {
   }
 });
 
+router.post('/procesar', optionalAuth, async (req, res) => {
+  try {
+    const result = await pagoService.processPayment({
+      ...req.body,
+      usuario_id: req.user?.id || req.body.usuario_id || null
+    });
+    res.json(result);
+  } catch (err) {
+    if (err.code === 'NOT_FOUND') return res.status(404).json({ error: err.message });
+    if (err.code === 'INVALID_INPUT') return res.status(400).json({ error: err.message });
+    if (err.code === 'CAJA_NO_ABIERTA') return res.status(409).json({ error: err.message });
+    if (err.code === 'SERIE_LOCK') return res.status(503).json({ error: err.message });
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 module.exports = router;

@@ -6,11 +6,13 @@ const optionalAuth = require('../middleware/optionalAuthMiddleware');
 router.put('/:id', optionalAuth, async (req, res) => {
   try {
     const pedidoId = req.params.id;
-    const { detalles } = req.body;
+    const { detalles, mesa_temporal_codigo } = req.body;
     if (!Array.isArray(detalles)) return res.status(400).json({ error: 'detalles must be array' });
-    await pedidoService.updatePedidoDetalles(pedidoId, detalles);
+    await pedidoService.updatePedidoDetalles(pedidoId, detalles, mesa_temporal_codigo);
     res.json({ ok: true });
   } catch (err) {
+    if (err.code === 'VALIDATION_ERROR') return res.status(400).json({ error: err.message });
+    if (err.code === 'NOT_FOUND') return res.status(404).json({ error: err.message });
     console.error(err);
     res.status(500).json({ error: 'Internal server error' });
   }
