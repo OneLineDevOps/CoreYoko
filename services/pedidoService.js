@@ -80,6 +80,7 @@ async function getPedidoSucursalCode(pedidoId) {
 async function createPedido({
   sucursal_id,
   mesa_id,
+  seccion_id,
   mesa_temporal,
   mesa_temporal_codigo,
   cliente_id,
@@ -97,6 +98,11 @@ async function createPedido({
     err.code = 'VALIDATION_ERROR';
     throw err;
   }
+  if (mesa_temporal && !seccion_id) {
+    const err = new Error('Seleccione la sección de la mesa temporal');
+    err.code = 'VALIDATION_ERROR';
+    throw err;
+  }
 
   const conn = await db.getConnection();
   let temporalLockName = null;
@@ -105,6 +111,18 @@ async function createPedido({
     const numero = generateNumero();
     let mesaTemporalCodigo = null;
     if (mesa_temporal) {
+      const [sections] = await conn.execute(
+        `SELECT id
+         FROM secciones_mesa
+         WHERE id = ? AND sucursal_id = ? AND activo = 1
+         LIMIT 1`,
+        [seccion_id, sucursal_id]
+      );
+      if (!sections?.length) {
+        const err = new Error('La sección seleccionada no pertenece a la sucursal');
+        err.code = 'VALIDATION_ERROR';
+        throw err;
+      }
       const requestedCode = normalizeMesaTemporalCodigo(mesa_temporal_codigo);
       const temporal = await reserveMesaTemporalCodigo(conn, sucursal_id, requestedCode);
       mesaTemporalCodigo = temporal.codigo;
@@ -112,12 +130,13 @@ async function createPedido({
     }
     const [res] = await conn.execute(
       `INSERT INTO pedidos
-       (numero, sucursal_id, mesa_id, mesa_temporal_codigo, cliente_id, tipo_pedido, usuario_creacion)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+       (numero, sucursal_id, mesa_id, seccion_id, mesa_temporal_codigo, cliente_id, tipo_pedido, usuario_creacion)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         numero,
         sucursal_id,
         mesa_temporal ? null : (mesa_id || null),
+        mesa_temporal ? seccion_id : null,
         mesaTemporalCodigo,
         cliente_id || null,
         tipo_pedido,
@@ -180,7 +199,12 @@ async function createPedido({
       logger.error('pedido_nuevo websocket error', emitErr);
     }
 
-    return { id: pedidoId, numero, mesa_temporal_codigo: mesaTemporalCodigo };
+    return {
+      id: pedidoId,
+      numero,
+      seccion_id: mesa_temporal ? Number(seccion_id) : null,
+      mesa_temporal_codigo: mesaTemporalCodigo
+    };
   } catch (err) {
     await conn.rollback();
     logger.error('createPedido error', err);
