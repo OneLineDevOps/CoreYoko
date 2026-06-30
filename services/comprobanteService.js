@@ -3,6 +3,12 @@ const db = require('../models/db');
 const config = require('../config/db');
 const PDFDocument = require('pdfkit');
 const cajaService = require('./cajaService');
+const {
+  TICKET_WIDTH,
+  centerLine,
+  centerWrapped,
+  receiptPresentation,
+} = require('../utils/receiptPresentation');
 const trabajoImpresionService = require('./trabajoImpresionService');
 
 function money(value) {
@@ -260,76 +266,85 @@ async function getById(id) {
 }
 
 function renderPrintText(comprobante) {
-  const cliente = comprobante.razon_social || `${comprobante.nombres || ''} ${comprobante.apellidos || ''}`.trim() || 'Consumidor final';
-  const restaurantName = comprobante.restaurante_nombre || 'Yoko Restaurante';
-  const restaurantRuc = comprobante.restaurante_ruc || '';
-  const address = comprobante.sucursal_direccion || comprobante.restaurante_direccion || '';
-  const phone = comprobante.sucursal_telefono || comprobante.restaurante_telefono || '';
-  const comprobanteNumber = `${comprobante.serie}-${String(comprobante.numero).padStart(8, '0')}`;
+  const presentation = receiptPresentation(comprobante);
+  const line = '-'.repeat(TICKET_WIDTH);
   const lines = [
-    restaurantName.toUpperCase(),
-    restaurantRuc ? `RUC: ${restaurantRuc}` : '',
-    address,
-    phone ? `Tel: ${phone}` : '',
-    comprobante.sucursal_nombre ? `Sucursal: ${comprobante.sucursal_nombre}` : '',
-    '--------------------------------',
-    `${comprobante.tipo} ${comprobanteNumber}`,
-    `Fecha: ${comprobante.fecha_emision}`,
+    ...centerWrapped(presentation.restaurantName.toUpperCase()),
+    presentation.restaurantRuc ? centerLine(`RUC: ${presentation.restaurantRuc}`) : '',
+    presentation.branchName ? centerLine(`Sucursal: ${presentation.branchName}`) : '',
+    ...centerWrapped(presentation.address),
+    presentation.phone ? centerLine(`Telefono: ${presentation.phone}`) : '',
+    line,
+    centerLine(presentation.typeLabel),
+    centerLine(presentation.number),
+    line,
+    presentation.dateTime ? `Fecha: ${presentation.dateTime}` : '',
     comprobante.sesion_caja_id ? `Caja: #${comprobante.sesion_caja_id}` : '',
     comprobante.pedido_numero ? `Pedido: ${comprobante.pedido_numero}` : '',
     comprobante.mesa_codigo ? `Mesa: ${comprobante.mesa_codigo}` : '',
-    '--------------------------------',
-    `Cliente: ${cliente}`,
+    line,
+    `Cliente: ${presentation.customer}`,
     comprobante.numero_documento ? `Documento: ${comprobante.numero_documento}` : '',
-    '--------------------------------',
+    line,
     ...comprobante.detalles.map((d) => {
       const qty = Number(d.cantidad || 0);
       const unit = Number(d.precio_unitario || 0);
       const sub = Number(d.subtotal || 0);
       return `${d.descripcion}\n  ${qty} x ${unit.toFixed(2)}      ${sub.toFixed(2)}`;
     }),
-    '--------------------------------',
-    `Op. gravada: ${Number(comprobante.subtotal).toFixed(2)}`,
-    `IGV incluido: ${Number(comprobante.igv).toFixed(2)}`,
-    `TOTAL: ${Number(comprobante.total).toFixed(2)}`,
-    '--------------------------------',
-    'Gracias por su preferencia'
+    line,
+    `Op. gravada: S/ ${Number(comprobante.subtotal).toFixed(2)}`,
+    `IGV incluido: S/ ${Number(comprobante.igv).toFixed(2)}`,
+    `TOTAL: S/ ${Number(comprobante.total).toFixed(2)}`,
+    line,
+    ...presentation.closingLines.map((message) => centerLine(message)),
   ];
   return lines.filter(Boolean).join('\n');
 }
 
 function generatePdfBuffer(comprobante) {
   return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ size: [226, 600], margin: 16 });
+    const detailHeight = (comprobante.detalles || []).reduce((height, detail) => {
+      const descriptionLines = Math.max(1, Math.ceil(String(detail.descripcion || 'Producto').length / 30));
+      return height + 21 + (descriptionLines - 1) * 10;
+    }, 0);
+    const ticketHeight = Math.max(400, 295 + detailHeight);
+    const doc = new PDFDocument({ size: [226, ticketHeight], margin: 16 });
     const chunks = [];
 
     doc.on('data', (chunk) => chunks.push(chunk));
     doc.on('end', () => resolve(Buffer.concat(chunks)));
     doc.on('error', reject);
 
-    const cliente = comprobante.razon_social || `${comprobante.nombres || ''} ${comprobante.apellidos || ''}`.trim() || 'Consumidor final';
-    const restaurantName = comprobante.restaurante_nombre || 'Yoko Restaurante';
-    const restaurantRuc = comprobante.restaurante_ruc || '';
-    const address = comprobante.sucursal_direccion || comprobante.restaurante_direccion || '';
-    const phone = comprobante.sucursal_telefono || comprobante.restaurante_telefono || '';
-    const comprobanteNumber = `${comprobante.serie}-${String(comprobante.numero).padStart(8, '0')}`;
+    const presentation = receiptPresentation(comprobante);
 
     const writeLine = (text, opts = {}) => {
       if (!text) return;
-      doc.fontSize(opts.size || 9).text(String(text), { align: opts.align || 'left' });
+      doc
+        .font(opts.bold ? 'Helvetica-Bold' : 'Helvetica')
+        .fontSize(opts.size || 9)
+        .text(String(text), { align: opts.align || 'left' });
     };
 
-    doc.font('Helvetica-Bold').fontSize(11).text(restaurantName.toUpperCase(), { align: 'center' });
-    if (restaurantRuc) writeLine(`RUC: ${restaurantRuc}`, { align: 'center' });
-    if (address) writeLine(address, { align: 'center' });
-    if (phone) writeLine(`Tel: ${phone}`, { align: 'center' });
-    if (comprobante.sucursal_nombre) writeLine(`Sucursal: ${comprobante.sucursal_nombre}`, { align: 'center' });
+    doc.font('Helvetica-Bold').fontSize(13).text(presentation.restaurantName.toUpperCase(), { align: 'center' });
+    if (presentation.restaurantRuc) {
+      doc.font('Helvetica-Bold').fontSize(9).text(`RUC: ${presentation.restaurantRuc}`, { align: 'center' });
+    }
+    if (presentation.branchName) writeLine(`Sucursal: ${presentation.branchName}`, { align: 'center' });
+    if (presentation.address) writeLine(presentation.address, { align: 'center' });
+    if (presentation.phone) writeLine(`Telefono: ${presentation.phone}`, { align: 'center' });
     doc.moveDown(0.4);
     doc.moveTo(16, doc.y).lineTo(210, doc.y).stroke();
     doc.moveDown(0.4);
 
-    doc.font('Helvetica-Bold').fontSize(10).text(`${comprobante.tipo} ${comprobanteNumber}`);
-    writeLine(`Fecha: ${comprobante.fecha_emision}`);
+    doc.font('Helvetica-Bold').fontSize(11).text(presentation.typeLabel, { align: 'center' });
+    doc.font('Helvetica-Bold').fontSize(10).text(presentation.number, { align: 'center' });
+    doc.font('Helvetica').fontSize(7).text('Representacion impresa del comprobante electronico', { align: 'center' });
+    doc.moveDown(0.3);
+    doc.moveTo(16, doc.y).lineTo(210, doc.y).stroke();
+    doc.moveDown(0.3);
+
+    if (presentation.dateTime) writeLine(`Fecha: ${presentation.dateTime}`);
     if (comprobante.sesion_caja_id) writeLine(`Caja: #${comprobante.sesion_caja_id}`);
     if (comprobante.pedido_numero) writeLine(`Pedido: ${comprobante.pedido_numero}`);
     if (comprobante.mesa_codigo) writeLine(`Mesa: ${comprobante.mesa_codigo}`);
@@ -337,7 +352,7 @@ function generatePdfBuffer(comprobante) {
     doc.moveTo(16, doc.y).lineTo(210, doc.y).stroke();
     doc.moveDown(0.2);
 
-    writeLine(`Cliente: ${cliente}`);
+    writeLine(`Cliente: ${presentation.customer}`);
     if (comprobante.numero_documento) writeLine(`Documento: ${comprobante.numero_documento}`);
     doc.moveDown(0.2);
     doc.moveTo(16, doc.y).lineTo(210, doc.y).stroke();
@@ -355,13 +370,14 @@ function generatePdfBuffer(comprobante) {
 
     doc.moveTo(16, doc.y).lineTo(210, doc.y).stroke();
     doc.moveDown(0.2);
-    writeLine(`Op. gravada: ${Number(comprobante.subtotal).toFixed(2)}`);
-    writeLine(`IGV incluido: ${Number(comprobante.igv).toFixed(2)}`);
-    doc.font('Helvetica-Bold').fontSize(10).text(`TOTAL: ${Number(comprobante.total).toFixed(2)}`);
+    writeLine(`Op. gravada: S/ ${Number(comprobante.subtotal).toFixed(2)}`);
+    writeLine(`IGV incluido: S/ ${Number(comprobante.igv).toFixed(2)}`);
+    doc.font('Helvetica-Bold').fontSize(11).text(`TOTAL: S/ ${Number(comprobante.total).toFixed(2)}`);
     doc.moveDown(0.2);
     doc.moveTo(16, doc.y).lineTo(210, doc.y).stroke();
-    doc.moveDown(0.2);
-    writeLine('Gracias por su preferencia', { align: 'center' });
+    doc.moveDown(0.5);
+    doc.font('Helvetica-Bold').fontSize(10).text(presentation.closingLines[0], { align: 'center' });
+    doc.font('Helvetica').fontSize(8.5).text(presentation.closingLines.slice(1).join('\n'), { align: 'center' });
 
     doc.end();
   });

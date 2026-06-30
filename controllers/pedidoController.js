@@ -58,4 +58,20 @@ async function updateEstado(req, res) {
   }
 }
 
-module.exports = { create, getById, list, updateEstado };
+async function remove(req, res) {
+  try {
+    await pedidoService.deletePedido(req.params.id);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    if (err.code === 'NOT_FOUND') {
+      return res.status(404).json({ error: err.message });
+    }
+    if (err.code === 'ORDER_HAS_FINANCIAL_RECORDS' || err.code === 'ORDER_CLOSED') {
+      return res.status(409).json({ error: err.message });
+    }
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+module.exports = { create, getById, list, updateEstado, remove };

@@ -1,9 +1,10 @@
 const express = require('express');
 const router = express.Router();
 const pedidoService = require('../services/pedidoService');
-const optionalAuth = require('../middleware/optionalAuthMiddleware');
+const auth = require('../middleware/authMiddleware');
+const { requireRoles } = require('../middleware/roleMiddleware');
 
-router.put('/:id', optionalAuth, async (req, res) => {
+router.put('/:id', auth, requireRoles(['ROOT', 'ADMINISTRADOR', 'CAJERO']), async (req, res) => {
   try {
     const pedidoId = req.params.id;
     const { detalles, mesa_temporal_codigo } = req.body;

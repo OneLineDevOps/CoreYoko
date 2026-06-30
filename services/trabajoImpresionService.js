@@ -2,6 +2,12 @@
 
 const db = require('../models/db');
 const ws = require('../utils/ws');
+const {
+  TICKET_WIDTH,
+  centerLine,
+  centerWrapped,
+  receiptPresentation,
+} = require('../utils/receiptPresentation');
 const impresoraService = require('./impresoraService');
 
 function center(text, width = 42) {
@@ -36,24 +42,42 @@ function formatOrderTicket(order, details, title, purpose) {
 }
 
 function formatReceiptTicket(receipt) {
-  const width = 42;
+  const width = TICKET_WIDTH;
   const line = '-'.repeat(width);
+  const presentation = receiptPresentation(receipt);
   const rows = [
-    center(receipt.restaurante_nombre || 'YOKO', width),
-    center(`${receipt.tipo} ${receipt.serie}-${String(receipt.numero).padStart(8, '0')}`, width),
+    ...centerWrapped(presentation.restaurantName.toUpperCase(), width),
+    presentation.restaurantRuc ? centerLine(`RUC: ${presentation.restaurantRuc}`, width) : '',
+    presentation.branchName ? centerLine(`Sucursal: ${presentation.branchName}`, width) : '',
+    ...centerWrapped(presentation.address, width),
+    presentation.phone ? centerLine(`Telefono: ${presentation.phone}`, width) : '',
     line,
-    receipt.sucursal_nombre ? `Sucursal: ${receipt.sucursal_nombre}` : '',
+    centerLine(presentation.typeLabel, width),
+    centerLine(presentation.number, width),
+    line,
+    presentation.dateTime ? `Fecha: ${presentation.dateTime}` : '',
+    receipt.sesion_caja_id ? `Caja: #${receipt.sesion_caja_id}` : '',
     receipt.pedido_numero ? `Pedido: ${receipt.pedido_numero}` : '',
     receipt.mesa_codigo ? `Mesa: ${receipt.mesa_codigo}` : '',
+    line,
+    `Cliente: ${presentation.customer}`,
+    receipt.numero_documento ? `Documento: ${receipt.numero_documento}` : '',
     line,
   ].filter(Boolean);
   for (const detail of receipt.detalles || []) {
     rows.push(`${Number(detail.cantidad || 1)}x ${detail.descripcion || 'Producto'}`);
-    rows.push(`  S/ ${Number(detail.subtotal || 0).toFixed(2)}`);
+    rows.push(
+      `  ${Number(detail.cantidad || 1)} x S/ ${Number(detail.precio_unitario || 0).toFixed(2)}`,
+      `  Subtotal: S/ ${Number(detail.subtotal || 0).toFixed(2)}`
+    );
   }
   rows.push(
     line,
+    `Op. gravada: S/ ${Number(receipt.subtotal || 0).toFixed(2)}`,
+    `IGV incluido: S/ ${Number(receipt.igv || 0).toFixed(2)}`,
     `TOTAL: S/ ${Number(receipt.total || 0).toFixed(2)}`,
+    line,
+    ...presentation.closingLines.map((message) => centerLine(message, width)),
     '',
     '',
     ''
@@ -70,12 +94,14 @@ async function enqueueForPurpose({
   idempotencyKey,
   content,
 }) {
+  await impresoraService.markStaleDetected(sucursalId);
   const [printers] = await db.query(
     `SELECT i.id
      FROM impresoras i
      JOIN impresora_propositos ip ON ip.impresora_id = i.id
      WHERE i.sucursal_id = ?
        AND i.activo = 1
+       AND i.estado = 'ACTIVA'
        AND ip.activo = 1
        AND ip.proposito = ?`,
     [sucursalId, purpose]

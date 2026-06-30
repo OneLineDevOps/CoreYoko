@@ -36,7 +36,7 @@ router.get('/', async (req, res) => {
     }
     const rows = await impresoraService.listBySucursal(
       req.query.sucursal_id,
-      req.query.include_inactive !== '0'
+      req.query.include_inactive === '1'
     );
     res.json(rows);
   } catch (error) {

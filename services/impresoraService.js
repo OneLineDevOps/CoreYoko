@@ -60,10 +60,29 @@ async function branchById(id) {
   return rows?.[0] || null;
 }
 
-async function listBySucursal(sucursalId, includeInactive = true) {
+async function markStaleDetected(sucursalId) {
+  const params = [];
+  let branchFilter = '';
+  if (sucursalId) {
+    branchFilter = 'AND sucursal_id = ?';
+    params.push(sucursalId);
+  }
+  await db.pool.execute(
+    `UPDATE impresoras
+     SET estado = 'INACTIVA'
+     WHERE origen = 'DETECTADA'
+       AND estado = 'ACTIVA'
+       AND ultima_conexion < DATE_SUB(NOW(), INTERVAL 3 MINUTE)
+       ${branchFilter}`,
+    params
+  );
+}
+
+async function listBySucursal(sucursalId, includeInactive = false) {
+  await markStaleDetected(sucursalId);
   const params = [sucursalId];
   let activeFilter = '';
-  if (!includeInactive) activeFilter = 'AND i.activo = 1';
+  if (!includeInactive) activeFilter = "AND i.activo = 1 AND i.estado <> 'INACTIVA'";
   const [rows] = await db.query(
     `SELECT
        i.*,
@@ -221,6 +240,15 @@ async function syncAgent({ sucursalCodigo, agenteId, agenteNombre, printers = []
     await conn.execute(
       `UPDATE impresoras
        SET estado = 'INACTIVA'
+       WHERE sucursal_id = ?
+         AND origen = 'DETECTADA'
+         AND estado = 'ACTIVA'
+         AND ultima_conexion < DATE_SUB(NOW(), INTERVAL 3 MINUTE)`,
+      [branch.id]
+    );
+    await conn.execute(
+      `UPDATE impresoras
+       SET estado = 'INACTIVA'
        WHERE sucursal_id = ? AND agente_id = ? AND origen = 'DETECTADA'`,
       [branch.id, agenteId]
     );
@@ -293,6 +321,7 @@ module.exports = {
   PROPOSITOS,
   branchByCode,
   branchById,
+  markStaleDetected,
   listBySucursal,
   getById,
   create,

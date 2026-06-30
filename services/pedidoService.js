@@ -322,9 +322,111 @@ async function listPedidosBySucursal(sucursal_id, estado) {
   } else {
     sql += ` AND p.estado <> 'ANULADO'`;
   }
-  sql += ` ORDER BY p.fecha_pedido DESC LIMIT 100`;
+  sql += ` ORDER BY
+    CASE WHEN p.estado NOT IN ('ENTREGADO', 'ANULADO') THEN 0 ELSE 1 END,
+    p.fecha_pedido DESC
+    LIMIT 100`;
   const [rows] = await db.query(sql, params);
   return rows;
+}
+
+async function deletePedido(pedidoId) {
+  const conn = await db.getConnection();
+  let sucursalCodigo = null;
+  try {
+    await conn.beginTransaction();
+    const [rows] = await conn.execute(
+      `SELECT p.id, p.estado, p.mesa_id, s.codigo AS sucursal_codigo
+       FROM pedidos p
+       JOIN sucursales s ON s.id = p.sucursal_id
+       WHERE p.id = ?
+       LIMIT 1
+       FOR UPDATE`,
+      [pedidoId]
+    );
+    const pedido = rows?.[0];
+    if (!pedido) {
+      const err = new Error('Pedido no encontrado');
+      err.code = 'NOT_FOUND';
+      throw err;
+    }
+    if (['ENTREGADO', 'ANULADO'].includes(String(pedido.estado).toUpperCase())) {
+      const err = new Error('No se puede eliminar un pedido cerrado');
+      err.code = 'ORDER_CLOSED';
+      throw err;
+    }
+
+    const [financialRows] = await conn.execute(
+      `SELECT
+         EXISTS(SELECT 1 FROM pagos WHERE pedido_id = ? LIMIT 1) AS tiene_pagos,
+         EXISTS(
+           SELECT 1
+           FROM comprobantes comp
+           JOIN cuentas c ON c.id = comp.cuenta_id
+           WHERE c.pedido_id = ?
+           LIMIT 1
+         ) AS tiene_comprobantes`,
+      [pedidoId, pedidoId]
+    );
+    if (Number(financialRows?.[0]?.tiene_pagos) || Number(financialRows?.[0]?.tiene_comprobantes)) {
+      const err = new Error('No se puede eliminar un pedido que ya tiene pagos o comprobantes');
+      err.code = 'ORDER_HAS_FINANCIAL_RECORDS';
+      throw err;
+    }
+
+    await conn.execute(
+      `DELETE cd
+       FROM cuenta_detalles cd
+       JOIN cuentas c ON c.id = cd.cuenta_id
+       WHERE c.pedido_id = ?`,
+      [pedidoId]
+    );
+    await conn.execute('DELETE FROM cuentas WHERE pedido_id = ?', [pedidoId]);
+    await conn.execute(
+      `DELETE FROM pedido_detalle_modificadores
+       WHERE pedido_detalle_id IN (
+         SELECT id FROM pedido_detalles WHERE pedido_id = ?
+       )`,
+      [pedidoId]
+    );
+    await conn.execute('DELETE FROM pedido_detalles WHERE pedido_id = ?', [pedidoId]);
+    await conn.execute('DELETE FROM historial_estado_pedido WHERE pedido_id = ?', [pedidoId]);
+    await conn.execute('DELETE FROM pedidos WHERE id = ?', [pedidoId]);
+
+    if (pedido.mesa_id) {
+      const [otherOpenOrders] = await conn.execute(
+        `SELECT id
+         FROM pedidos
+         WHERE mesa_id = ?
+           AND estado NOT IN ('ENTREGADO', 'ANULADO')
+         LIMIT 1`,
+        [pedido.mesa_id]
+      );
+      if (!otherOpenOrders?.length) {
+        await conn.execute(
+          `UPDATE mesas
+           SET estado = 'LIBRE'
+           WHERE id = ? AND estado <> 'RESERVADA'`,
+          [pedido.mesa_id]
+        );
+      }
+    }
+
+    sucursalCodigo = pedido.sucursal_codigo;
+    await conn.commit();
+
+    ws.broadcastToSucursal(sucursalCodigo, {
+      type: 'pedido_eliminado',
+      data: { id: Number(pedidoId), sucursal_codigo: sucursalCodigo }
+    });
+    return true;
+  } catch (err) {
+    await conn.rollback();
+    logger.error('deletePedido error', err);
+    throw err;
+  } finally {
+    conn.release();
+  }
 }
 
 async function updatePedidoEstado(pedidoId, nuevoEstado, usuarioId, observacion) {
@@ -474,4 +576,11 @@ async function updatePedidoDetalles(pedidoId, detalles = [], mesaTemporalCodigoI
   }
 }
 
-module.exports = { createPedido, getPedidoById, listPedidosBySucursal, updatePedidoEstado, updatePedidoDetalles };
+module.exports = {
+  createPedido,
+  getPedidoById,
+  listPedidosBySucursal,
+  updatePedidoEstado,
+  updatePedidoDetalles,
+  deletePedido
+};
