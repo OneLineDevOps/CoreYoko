@@ -5,6 +5,21 @@ const comprobanteService = require('../services/comprobanteService');
 const trabajoImpresionService = require('../services/trabajoImpresionService');
 const auth = require('../middleware/authMiddleware');
 const optionalAuth = require('../middleware/optionalAuthMiddleware');
+const { requireRoles } = require('../middleware/roleMiddleware');
+const sunatService = require('../services/sunatService');
+
+const fiscalAccess = [auth, requireRoles(['ROOT', 'ADMINISTRADOR'])];
+const rootFiscalAccess = [auth, requireRoles(['ROOT'])];
+
+async function canAccessFiscalDocument(req, comprobanteId) {
+  const comprobante = await sunatService.getComprobanteContext(comprobanteId);
+  if (!comprobante) return null;
+  const isRoot = (req.user?.role_names || []).includes('ROOT');
+  if (!isRoot && Number(comprobante.restaurante_id) !== Number(req.user?.restaurante_id)) {
+    return false;
+  }
+  return comprobante;
+}
 
 router.post('/', optionalAuth, async (req, res) => {
   try {
@@ -18,6 +33,49 @@ router.post('/', optionalAuth, async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+
+router.post('/sunat/reconciliar', ...rootFiscalAccess, async (req, res) => {
+  try {
+    const result = await sunatService.reconcilePending(req.body?.dias || 3);
+    res.json(result);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'No se pudo reconciliar la cola SUNAT' });
+  }
+});
+
+router.post('/:id/sunat/reintentar', ...fiscalAccess, async (req, res) => {
+  try {
+    const access = await canAccessFiscalDocument(req, req.params.id);
+    if (access === null) return res.status(404).json({ error: 'Comprobante no encontrado' });
+    if (access === false) return res.status(403).json({ error: 'Comprobante fuera de su restaurante' });
+    const result = await sunatService.retry(req.params.id);
+    res.json(result);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'No se pudo reencolar el comprobante' });
+  }
+});
+
+for (const kind of ['xml', 'cdr']) {
+  router.get(`/:id/sunat/${kind}`, ...fiscalAccess, async (req, res) => {
+    try {
+      const access = await canAccessFiscalDocument(req, req.params.id);
+      if (access === null) return res.status(404).json({ error: 'Comprobante no encontrado' });
+      if (access === false) return res.status(403).json({ error: 'Comprobante fuera de su restaurante' });
+      const file = await sunatService.downloadFile(req.params.id, kind);
+      res.setHeader('Content-Type', file.contentType);
+      res.setHeader('Content-Disposition', `attachment; filename="${file.filename}"`);
+      res.send(file.buffer);
+    } catch (err) {
+      if (err.code === 'SUNAT_NOT_ACCEPTED') return res.status(409).json({ error: err.message });
+      if (err.code === 'SUNAT_NOT_CONFIGURED') return res.status(409).json({ error: err.message });
+      if (err.code === 'NOT_FOUND') return res.status(404).json({ error: err.message });
+      console.error(err);
+      res.status(502).json({ error: err.message || `No se pudo descargar ${kind.toUpperCase()}` });
+    }
+  });
+}
 
 router.get('/:id', async (req, res) => {
   try {

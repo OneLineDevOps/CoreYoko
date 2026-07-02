@@ -49,7 +49,17 @@ app.use('/api', routes);
 const server = http.createServer(app);
 const ws = require('./utils/ws');
 ws.init(server);
+const sunatService = require('./services/sunatService');
 
 server.listen(PORT, () => {
   console.log(`Servidor corriendo en http://localhost:${PORT}`);
+  sunatService.startWorker();
 });
+
+function shutdown() {
+  sunatService.stopWorker();
+  server.close(() => process.exit(0));
+}
+
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);

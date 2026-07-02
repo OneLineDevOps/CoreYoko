@@ -2,7 +2,7 @@
 
 const db = require('../models/db');
 
-const PROPOSITOS = ['CAJA', 'COCINA', 'BAR', 'DELIVERY'];
+const PROPOSITOS_BASE = ['CAJA', 'DELIVERY'];
 const ESTADOS = ['ACTIVA', 'INACTIVA', 'ERROR'];
 
 function protocolForPort(port) {
@@ -187,8 +187,15 @@ async function update(id, data) {
 }
 
 async function setPurposes(printerId, purposes = []) {
+  const [stationRows] = await db.query(
+    'SELECT UPPER(TRIM(nombre)) AS proposito FROM estaciones_cocina WHERE activo = 1'
+  );
+  const allowedPurposes = new Set([
+    ...PROPOSITOS_BASE,
+    ...(stationRows || []).map((row) => row.proposito).filter(Boolean),
+  ]);
   const valid = [...new Set((purposes || []).map((item) => String(item).toUpperCase()))]
-    .filter((item) => PROPOSITOS.includes(item));
+    .filter((item) => allowedPurposes.has(item));
   const conn = await db.getConnection();
   try {
     await conn.beginTransaction();
@@ -318,7 +325,7 @@ async function syncAgent({ sucursalCodigo, agenteId, agenteNombre, printers = []
 }
 
 module.exports = {
-  PROPOSITOS,
+  PROPOSITOS: PROPOSITOS_BASE,
   branchByCode,
   branchById,
   markStaleDetected,

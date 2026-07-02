@@ -10,6 +10,7 @@ const {
   receiptPresentation,
 } = require('../utils/receiptPresentation');
 const trabajoImpresionService = require('./trabajoImpresionService');
+const sunatService = require('./sunatService');
 
 function money(value) {
   return Number(Number(value || 0).toFixed(2));
@@ -206,6 +207,7 @@ async function createWithConnection(
       );
     }
 
+    await sunatService.enqueueComprobante(comprobanteId, conn);
     await conn.execute('UPDATE cuentas SET estado = "FACTURADA", total = ? WHERE id = ?', [total.toFixed(2), cuenta_id]);
     return { id: comprobanteId };
 }

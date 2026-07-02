@@ -1,12 +1,23 @@
 const express = require('express');
 const router = express.Router();
 const clienteService = require('../services/clienteService');
+const auth = require('../middleware/authMiddleware');
+
+router.use(auth);
 
 router.get('/by-document', async (req, res) => {
   try {
-    const row = await clienteService.findByDocument(req.query.numero_documento || req.query.numero);
+    const numero = req.query.numero_documento || req.query.numero;
+    const tipo = req.query.tipo_documento || req.query.tipo;
+    const externalLookup = req.query.consulta_externa !== '0';
+    const row = externalLookup
+      ? await clienteService.findOrCreateByDocument(tipo, numero)
+      : await clienteService.findByDocument(numero);
     res.json(row);
   } catch (err) {
+    if (err.status && err.code) {
+      return res.status(err.status).json({ error: err.message, code: err.code });
+    }
     console.error(err);
     res.status(500).json({ error: 'Internal server error' });
   }

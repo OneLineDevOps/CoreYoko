@@ -74,4 +74,41 @@ async function remove(req, res) {
   }
 }
 
-module.exports = { create, getById, list, updateEstado, remove };
+async function appendItems(req, res) {
+  try {
+    if (!Array.isArray(req.body.detalles) || req.body.detalles.length === 0) {
+      return res.status(400).json({ error: 'Debe agregar al menos un producto' });
+    }
+    const result = await pedidoService.appendPedidoDetalles(
+      req.params.id,
+      req.body.detalles
+    );
+    res.status(201).json(result);
+  } catch (err) {
+    console.error(err);
+    if (err.code === 'VALIDATION_ERROR') return res.status(400).json({ error: err.message });
+    if (err.code === 'NOT_FOUND') return res.status(404).json({ error: err.message });
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+async function printPrecuenta(req, res) {
+  try {
+    const result = await pedidoService.printPrecuenta(req.params.id);
+    res.json(result);
+  } catch (err) {
+    console.error(err);
+    if (err.code === 'NOT_FOUND') return res.status(404).json({ error: err.message });
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+module.exports = {
+  create,
+  getById,
+  list,
+  updateEstado,
+  remove,
+  appendItems,
+  printPrecuenta
+};

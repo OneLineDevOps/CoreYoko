@@ -6,6 +6,8 @@
     "start": "node server.js",
     "dev": "nodemon --watch . --ext js,json --delay 100 server.js",
     "dev:fast": "node --watch server.js",
+    "sunat:once": "node scripts/run-sunat-once.js",
+    "migrate:sunat": "node scripts/run-migration.js migrations/20260702_create_sunat_delivery.sql",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],

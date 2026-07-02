@@ -24,6 +24,16 @@ router.get('/', async (req, res) => {
   }
 });
 
+router.get('/estaciones', async (_req, res) => {
+  try {
+    const rows = await productoService.getStations();
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 router.get('/:id', async (req, res) => {
   try {
     const row = await productoService.getById(req.params.id, accessFor(req));
@@ -53,6 +63,7 @@ router.put('/:id', canManage, async (req, res) => {
     if (!updated) return res.status(404).json({ error: 'Not found' });
     res.json(updated);
   } catch (err) {
+    if (err.code === 'INVALID_INPUT') return res.status(400).json({ error: err.message });
     if (err.code === 'FORBIDDEN') return res.status(403).json({ error: err.message });
     console.error(err);
     res.status(500).json({ error: 'Internal server error' });

@@ -30,6 +30,10 @@ function buildFilters(query) {
     filters.push('comp.tipo = ?');
     params.push(query.tipo);
   }
+  if (query.sunat_estado) {
+    filters.push('comp.sunat_estado = ?');
+    params.push(query.sunat_estado);
+  }
 
   return { where: filters.join(' AND '), params };
 }
@@ -54,6 +58,7 @@ function baseFrom() {
       ORDER BY ABS(TIMESTAMPDIFF(SECOND, c2.fecha_emision, p.fecha_pago)), c2.id DESC
       LIMIT 1
     )
+    LEFT JOIN sunat_envios se ON se.comprobante_id = comp.id
   `;
 }
 
@@ -93,7 +98,14 @@ async function list(query) {
        comp.numero,
        comp.fecha_emision,
        comp.total AS comprobante_total,
-       comp.estado AS comprobante_estado
+       comp.estado AS comprobante_estado,
+       comp.sunat_estado,
+       comp.sunat_codigo,
+       comp.sunat_mensaje,
+       comp.sunat_enviado_at,
+       comp.sunat_aceptado_at,
+       se.intentos AS sunat_intentos,
+       se.max_intentos AS sunat_max_intentos
      ${baseFrom()}
      WHERE ${where}
      ORDER BY p.fecha_pago DESC, p.id DESC
@@ -202,6 +214,7 @@ async function filters({ sucursal_id, fecha }) {
     sesiones: sesiones || [],
     metodos: metodos || [],
     tipos: ['NOTA_PEDIDO', 'BOLETA', 'FACTURA', 'NOTA_CREDITO'],
+    sunat_estados: ['NO_APLICA', 'PENDIENTE', 'ENVIANDO', 'ACEPTADO', 'RECHAZADO', 'ERROR'],
   };
 }
 

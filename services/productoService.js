@@ -29,6 +29,40 @@ async function getCategory(id, access = {}) {
   return rows && rows.length ? rows[0] : null;
 }
 
+async function hydrateStations(products = []) {
+  if (!products.length) return products;
+  const [rows] = await db.query(
+    `SELECT pe.producto_id, ec.id, ec.nombre
+     FROM producto_estaciones pe
+     JOIN estaciones_cocina ec ON ec.id = pe.estacion_id AND ec.activo = 1
+     WHERE pe.producto_id IN (?)
+     ORDER BY ec.nombre, ec.id`,
+    [products.map((product) => product.id)]
+  );
+  const byProduct = new Map();
+  for (const row of rows || []) {
+    if (!byProduct.has(Number(row.producto_id))) byProduct.set(Number(row.producto_id), []);
+    byProduct.get(Number(row.producto_id)).push({
+      id: Number(row.id),
+      nombre: row.nombre
+    });
+  }
+  return products.map((product) => ({
+    ...product,
+    estaciones: byProduct.get(Number(product.id)) || []
+  }));
+}
+
+async function getStations() {
+  const [rows] = await db.query(
+    `SELECT id, nombre
+     FROM estaciones_cocina
+     WHERE activo = 1
+     ORDER BY nombre, id`
+  );
+  return (rows || []).map((row) => ({ ...row, id: Number(row.id) }));
+}
+
 async function getByCategory(categoriaId, access = {}) {
   if (!categoriaId || !(await getCategory(categoriaId, access))) return [];
   const [rows] = await db.query(
@@ -38,7 +72,7 @@ async function getByCategory(categoriaId, access = {}) {
      ORDER BY nombre, id`,
     [categoriaId]
   );
-  return rows || [];
+  return hydrateStations(rows || []);
 }
 
 async function getById(id, access = {}) {
@@ -54,10 +88,47 @@ async function getById(id, access = {}) {
      LIMIT 1`,
     [id, ...filter.params]
   );
-  return rows && rows.length ? rows[0] : null;
+  if (!rows || !rows.length) return null;
+  const hydrated = await hydrateStations([rows[0]]);
+  return hydrated[0] || null;
 }
 
-async function create({ categoria_id, codigo, nombre, descripcion, imagen, controla_stock }, access = {}) {
+async function setProductStations(productId, stationIds = [], access = {}) {
+  const product = await getById(productId, access);
+  if (!product) return null;
+  const ids = [...new Set((stationIds || []).map(Number).filter((id) => Number.isInteger(id) && id > 0))];
+  if (ids.length) {
+    const [stationRows] = await db.query(
+      'SELECT id FROM estaciones_cocina WHERE activo = 1 AND id IN (?)',
+      [ids]
+    );
+    if ((stationRows || []).length !== ids.length) {
+      const err = new Error('Una o más estaciones de impresión no son válidas');
+      err.code = 'INVALID_INPUT';
+      throw err;
+    }
+  }
+  const conn = await db.getConnection();
+  try {
+    await conn.beginTransaction();
+    await conn.execute('DELETE FROM producto_estaciones WHERE producto_id = ?', [productId]);
+    for (const stationId of ids) {
+      await conn.execute(
+        'INSERT INTO producto_estaciones (producto_id, estacion_id) VALUES (?, ?)',
+        [productId, stationId]
+      );
+    }
+    await conn.commit();
+    return getById(productId, access);
+  } catch (error) {
+    await conn.rollback();
+    throw error;
+  } finally {
+    conn.release();
+  }
+}
+
+async function create({ categoria_id, codigo, nombre, descripcion, imagen, controla_stock, estacion_ids }, access = {}) {
   if (!categoria_id || !nombre || !String(nombre).trim()) {
     const err = new Error('categoria_id y nombre son requeridos');
     err.code = 'INVALID_INPUT';
@@ -81,6 +152,9 @@ async function create({ categoria_id, codigo, nombre, descripcion, imagen, contr
       controla_stock ? 1 : 0
     ]
   );
+  if (Array.isArray(estacion_ids)) {
+    return setProductStations(result.insertId, estacion_ids, access);
+  }
   return getById(result.insertId, access);
 }
 
@@ -113,6 +187,9 @@ async function update(id, payload, access = {}) {
       id
     ]
   );
+  if (Array.isArray(payload.estacion_ids)) {
+    return setProductStations(id, payload.estacion_ids, access);
+  }
   return getById(id, access);
 }
 
@@ -199,4 +276,6 @@ module.exports = {
   createPrice,
   updatePrice,
   removePrice,
+  getStations,
+  setProductStations,
 };

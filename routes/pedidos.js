@@ -6,6 +6,18 @@ const auth = require('../middleware/authMiddleware');
 const { requireRoles } = require('../middleware/roleMiddleware');
 
 router.post('/', optionalAuth, ctrl.create);
+router.post(
+  '/:id/items',
+  auth,
+  requireRoles(['ROOT', 'ADMINISTRADOR', 'CAJERO', 'MOZO']),
+  ctrl.appendItems
+);
+router.post(
+  '/:id/precuenta',
+  auth,
+  requireRoles(['ROOT', 'ADMINISTRADOR', 'CAJERO', 'MOZO']),
+  ctrl.printPrecuenta
+);
 router.get('/', ctrl.list);
 router.get('/:id', ctrl.getById);
 router.patch('/:id/estado', optionalAuth, ctrl.updateEstado);

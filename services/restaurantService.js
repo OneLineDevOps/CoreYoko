@@ -8,14 +8,38 @@ function normalizePayload(data = {}) {
     direccion: data.direccion ? String(data.direccion).trim() : null,
     telefono: data.telefono ? String(data.telefono).trim() : null,
     activo: data.activo === undefined ? 1 : Number(Boolean(data.activo)),
+    sunat_activo: data.sunat_activo === undefined ? 0 : Number(Boolean(data.sunat_activo)),
   };
+}
+
+function validateSunatInput(data = {}) {
+  if (data.sunat_usuario_sol !== undefined && data.sunat_usuario_sol !== null && String(data.sunat_usuario_sol).trim()) {
+    const parts = String(data.sunat_usuario_sol).trim().split('#');
+    if (parts.length !== 2 || !parts[0] || !parts[1]) {
+      const err = new Error('El usuario SOL debe tener el formato usuario#clave');
+      err.code = 'INVALID_INPUT';
+      throw err;
+    }
+  }
+}
+
+function safeSelect(includeCredentials = false) {
+  return `r.id, r.nombre, r.ruc, r.direccion, r.telefono, r.activo,
+    ${includeCredentials ? 'r.sunat_usuario_sol, r.sunat_passphrase, r.sunat_token,' : ''}
+    r.sunat_activo,
+    CASE
+      WHEN r.sunat_usuario_sol IS NOT NULL
+       AND r.sunat_passphrase IS NOT NULL
+       AND r.sunat_token IS NOT NULL
+      THEN 1 ELSE 0
+    END AS sunat_configurado`;
 }
 
 async function getAll({ includeInactive = false } = {}) {
   const where = includeInactive ? '' : 'WHERE r.activo = 1';
   const [rows] = await db.query(
     `SELECT
-       r.*,
+       ${safeSelect()},
        COUNT(s.id) AS sucursales_count
      FROM restaurantes r
      LEFT JOIN sucursales s ON s.restaurante_id = r.id AND s.activo = 1
@@ -29,7 +53,7 @@ async function getAll({ includeInactive = false } = {}) {
 async function getById(id) {
   const [rows] = await db.query(
     `SELECT
-       r.*,
+       ${safeSelect(true)},
        COUNT(s.id) AS sucursales_count
      FROM restaurantes r
      LEFT JOIN sucursales s ON s.restaurante_id = r.id AND s.activo = 1
@@ -41,8 +65,25 @@ async function getById(id) {
   return rows && rows.length ? rows[0] : null;
 }
 
+async function getRawById(id) {
+  const [rows] = await db.query('SELECT * FROM restaurantes WHERE id = ? LIMIT 1', [id]);
+  return rows?.[0] || null;
+}
+
+async function getSunatCredentials(id) {
+  const row = await getRawById(id);
+  if (!row || !Number(row.activo) || !Number(row.sunat_activo)) return null;
+  if (!row.sunat_usuario_sol || !row.sunat_passphrase || !row.sunat_token) return null;
+  return {
+    usuario_sol: row.sunat_usuario_sol,
+    passphrase: row.sunat_passphrase,
+    token: row.sunat_token,
+  };
+}
+
 async function create(data) {
   const payload = normalizePayload(data);
+  validateSunatInput(data);
   if (!payload.nombre) {
     const err = new Error('nombre is required');
     err.code = 'INVALID_INPUT';
@@ -50,16 +91,28 @@ async function create(data) {
   }
 
   const [res] = await db.pool.execute(
-    `INSERT INTO restaurantes (nombre, ruc, direccion, telefono, activo)
-     VALUES (?, ?, ?, ?, ?)`,
-    [payload.nombre, payload.ruc, payload.direccion, payload.telefono, payload.activo]
+    `INSERT INTO restaurantes
+     (nombre, ruc, direccion, telefono, activo, sunat_usuario_sol, sunat_passphrase, sunat_token, sunat_activo)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      payload.nombre,
+      payload.ruc,
+      payload.direccion,
+      payload.telefono,
+      payload.activo,
+      data.sunat_usuario_sol ? String(data.sunat_usuario_sol).trim() : null,
+      data.sunat_passphrase ? String(data.sunat_passphrase) : null,
+      data.sunat_token ? String(data.sunat_token).trim() : null,
+      payload.sunat_activo,
+    ]
   );
   return getById(res.insertId);
 }
 
 async function update(id, data) {
-  const current = await getById(id);
+  const current = await getRawById(id);
   if (!current) return null;
+  validateSunatInput(data);
 
   const payload = normalizePayload({ ...current, ...data });
   if (!payload.nombre) {
@@ -70,9 +123,21 @@ async function update(id, data) {
 
   await db.pool.execute(
     `UPDATE restaurantes
-     SET nombre = ?, ruc = ?, direccion = ?, telefono = ?, activo = ?
+     SET nombre = ?, ruc = ?, direccion = ?, telefono = ?, activo = ?,
+         sunat_usuario_sol = ?, sunat_passphrase = ?, sunat_token = ?, sunat_activo = ?
      WHERE id = ?`,
-    [payload.nombre, payload.ruc, payload.direccion, payload.telefono, payload.activo, id]
+    [
+      payload.nombre,
+      payload.ruc,
+      payload.direccion,
+      payload.telefono,
+      payload.activo,
+      data.sunat_usuario_sol !== undefined ? (String(data.sunat_usuario_sol).trim() || null) : current.sunat_usuario_sol,
+      data.sunat_passphrase !== undefined ? (String(data.sunat_passphrase) || null) : current.sunat_passphrase,
+      data.sunat_token !== undefined ? (String(data.sunat_token).trim() || null) : current.sunat_token,
+      data.sunat_activo === undefined ? Number(current.sunat_activo || 0) : payload.sunat_activo,
+      id
+    ]
   );
   return getById(id);
 }
@@ -84,4 +149,4 @@ async function remove(id) {
   return { id: Number(id), deleted: true };
 }
 
-module.exports = { getAll, getById, create, update, remove };
+module.exports = { getAll, getById, getSunatCredentials, create, update, remove };

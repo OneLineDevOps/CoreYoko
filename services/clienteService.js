@@ -1,28 +1,57 @@
 'use strict';
 const db = require('../models/db');
+const documentLookupService = require('./documentLookupService');
+
+function clean(value) {
+  if (value === undefined || value === null) return null;
+  const result = String(value).trim();
+  return result || null;
+}
 
 function normalizePayload(payload = {}) {
-  const razonSocial = payload.razon_social || null;
-  const nombres = payload.nombres || razonSocial || 'Cliente';
+  const tipoDocumento = documentLookupService.normalizeDocumentType(payload.tipo_documento) || null;
+  const numeroDocumento = clean(payload.numero_documento);
+  const razonSocial = clean(payload.razon_social);
+  const nombres = clean(payload.nombres) || razonSocial || 'Cliente';
   return {
-    tipo_documento: payload.tipo_documento || null,
-    numero_documento: payload.numero_documento || null,
+    tipo_documento: tipoDocumento,
+    numero_documento: numeroDocumento,
     razon_social: razonSocial,
     nombres,
-    apellidos: payload.apellidos || null,
-    telefono: payload.telefono || null,
-    correo: payload.correo || null,
-    direccion: payload.direccion || null
+    apellidos: clean(payload.apellidos),
+    telefono: clean(payload.telefono),
+    correo: clean(payload.correo),
+    direccion: clean(payload.direccion),
   };
 }
 
 async function findByDocument(numero_documento) {
-  if (!numero_documento) return null;
+  const number = clean(numero_documento);
+  if (!number) return null;
   const [rows] = await db.query(
     'SELECT * FROM clientes WHERE numero_documento = ? LIMIT 1',
-    [numero_documento]
+    [number]
   );
   return rows && rows.length ? rows[0] : null;
+}
+
+async function findOrCreateByDocument(tipo_documento, numero_documento) {
+  const number = clean(numero_documento);
+  const existing = await findByDocument(number);
+  if (existing) return { ...existing, fuente_consulta: 'BASE_DATOS' };
+
+  const inferredType = tipo_documento || (String(number || '').length === 11 ? 'RUC' : 'DNI');
+  const validated = documentLookupService.validateDocument(inferredType, number);
+  const { type } = validated;
+  const externalData = await documentLookupService.lookupDocument(type, number);
+  if (!externalData) return null;
+
+  // Revalidar antes del INSERT reduce duplicados si dos cajas consultan a la vez.
+  const foundAfterLookup = await findByDocument(number);
+  if (foundAfterLookup) return { ...foundAfterLookup, fuente_consulta: 'BASE_DATOS' };
+
+  const created = await create(externalData);
+  return { ...created, fuente_consulta: 'API' };
 }
 
 async function search(q) {
@@ -93,4 +122,4 @@ async function update(id, payload) {
   return getById(id);
 }
 
-module.exports = { findByDocument, search, create, getById, update };
+module.exports = { findByDocument, findOrCreateByDocument, search, create, getById, update };

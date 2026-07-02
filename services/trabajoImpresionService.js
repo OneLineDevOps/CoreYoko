@@ -85,6 +85,45 @@ function formatReceiptTicket(receipt) {
   return rows.join('\n');
 }
 
+function formatPrecuentaTicket(order) {
+  const width = TICKET_WIDTH;
+  const line = '-'.repeat(width);
+  const rows = [
+    centerLine('YOKO', width),
+    centerLine('PRECUENTA', width),
+    centerLine('NO ES COMPROBANTE DE PAGO', width),
+    line,
+    `Pedido: ${order.numero || order.id}`,
+    `Mesa: ${order.mesa_nombre || order.mesa_temporal_codigo || order.mesa_id || 'Sin mesa'}`,
+    order.usuario_creacion_nombre ? `Mesero: ${order.usuario_creacion_nombre}` : '',
+    line,
+  ].filter(Boolean);
+  for (const detail of order.detalles || []) {
+    const quantity = Number(detail.cantidad || 1);
+    const unitPrice = Number(detail.precio_unitario || 0);
+    rows.push(`${quantity}x ${detail.producto_nombre || detail.descripcion || 'Producto'}`);
+    rows.push(`  ${quantity} x S/ ${unitPrice.toFixed(2)}`);
+    for (const modifier of detail.modificadores || []) {
+      rows.push(
+        `  + ${Number(modifier.cantidad || 1)}x ${modifier.opcion_nombre || 'Modificador'}`
+        + ` S/ ${Number(modifier.precio || 0).toFixed(2)}`
+      );
+    }
+    if (detail.observacion) rows.push(`  Obs: ${detail.observacion}`);
+    rows.push(`  Subtotal: S/ ${Number(detail.subtotal || 0).toFixed(2)}`, '');
+  }
+  rows.push(
+    line,
+    `TOTAL: S/ ${Number(order.total || 0).toFixed(2)}`,
+    line,
+    centerLine('Documento informativo', width),
+    '',
+    '',
+    ''
+  );
+  return rows.join('\n');
+}
+
 async function enqueueForPurpose({
   sucursalId,
   purpose,
@@ -143,7 +182,7 @@ async function enqueueForPurpose({
 async function enqueueOrder(order, eventName = 'NUEVO') {
   if (!order?.id || !order?.sucursal_id) return [];
   const [stationRows] = await db.query(
-    `SELECT pe.producto_id, UPPER(ec.nombre) AS estacion
+    `SELECT pe.producto_id, UPPER(TRIM(ec.nombre)) AS estacion
      FROM producto_estaciones pe
      JOIN estaciones_cocina ec ON ec.id = pe.estacion_id AND ec.activo = 1
      WHERE pe.producto_id IN (?)`,
@@ -157,35 +196,32 @@ async function enqueueOrder(order, eventName = 'NUEVO') {
     stationByProduct.get(Number(row.producto_id)).push(row.estacion);
   }
 
-  const groups = { COCINA: [], BAR: [] };
+  const groups = new Map();
   for (const detail of order.detalles || []) {
     const stations = stationByProduct.get(Number(detail.producto_id)) || [];
-    if (stations.includes('BAR')) groups.BAR.push(detail);
-    if (!stations.includes('BAR') || stations.some((station) => station !== 'BAR')) groups.COCINA.push(detail);
+    const destinations = stations.length ? stations : ['COCINA'];
+    for (const station of destinations) {
+      if (!groups.has(station)) groups.set(station, []);
+      groups.get(station).push(detail);
+    }
   }
 
   const stamp = eventName === 'NUEVO' ? 'NUEVO' : `ACT-${Date.now()}`;
   const jobs = [];
-  if (groups.COCINA.length) {
+  for (const [station, stationDetails] of groups.entries()) {
     jobs.push(...await enqueueForPurpose({
       sucursalId: order.sucursal_id,
-      purpose: 'COCINA',
+      purpose: station,
       type: `PEDIDO_${eventName}`,
       referenceType: 'PEDIDO',
       referenceId: order.id,
-      idempotencyKey: `PEDIDO:${order.id}:${stamp}:COCINA`,
-      content: formatOrderTicket(order, groups.COCINA, eventName === 'NUEVO' ? 'NUEVO PEDIDO' : 'PEDIDO ACTUALIZADO', 'COCINA'),
-    }));
-  }
-  if (groups.BAR.length) {
-    jobs.push(...await enqueueForPurpose({
-      sucursalId: order.sucursal_id,
-      purpose: 'BAR',
-      type: `PEDIDO_${eventName}`,
-      referenceType: 'PEDIDO',
-      referenceId: order.id,
-      idempotencyKey: `PEDIDO:${order.id}:${stamp}:BAR`,
-      content: formatOrderTicket(order, groups.BAR, eventName === 'NUEVO' ? 'NUEVO PEDIDO' : 'PEDIDO ACTUALIZADO', 'BAR'),
+      idempotencyKey: `PEDIDO:${order.id}:${stamp}:${station}`,
+      content: formatOrderTicket(
+        order,
+        stationDetails,
+        eventName === 'NUEVO' ? 'NUEVO PEDIDO' : (eventName === 'AGREGADO' ? 'ITEMS AGREGADOS' : 'PEDIDO ACTUALIZADO'),
+        station
+      ),
     }));
   }
   if (String(order.tipo_pedido).toUpperCase() === 'DELIVERY') {
@@ -200,6 +236,19 @@ async function enqueueOrder(order, eventName = 'NUEVO') {
     }));
   }
   return jobs;
+}
+
+async function enqueuePrecuenta(order) {
+  if (!order?.id || !order?.sucursal_id) return [];
+  return enqueueForPurpose({
+    sucursalId: order.sucursal_id,
+    purpose: 'CAJA',
+    type: 'PRECUENTA',
+    referenceType: 'PEDIDO',
+    referenceId: order.id,
+    idempotencyKey: `PRECUENTA:${order.id}:${Date.now()}`,
+    content: formatPrecuentaTicket(order),
+  });
 }
 
 async function enqueueReceipt(receipt, options = {}) {
@@ -339,9 +388,11 @@ async function retry(id) {
 module.exports = {
   formatOrderTicket,
   formatReceiptTicket,
+  formatPrecuentaTicket,
   enqueueForPurpose,
   enqueueOrder,
   enqueueReceipt,
+  enqueuePrecuenta,
   list,
   claim,
   updateStatus,

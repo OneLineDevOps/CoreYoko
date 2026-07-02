@@ -34,5 +34,6 @@ module.exports = {
   origin,
   methods,
   allowedHeaders,
+  exposedHeaders: ['Content-Disposition'],
   credentials
 };
