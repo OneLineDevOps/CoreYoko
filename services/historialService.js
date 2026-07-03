@@ -84,7 +84,8 @@ async function list(query) {
   );
   const [rows] = await db.query(
     `SELECT
-       pg.id AS pago_id, pg.fecha_pago, pg.monto,
+       pg.id AS pago_id, pg.fecha_pago, pg.monto, pg.estado AS pago_estado,
+       pg.motivo_anulacion AS pago_motivo_anulacion, pg.anulado_at,
        COALESCE(comp.sesion_caja_id, pg.sesion_caja_id) AS sesion_caja_id,
        COALESCE(comp.usuario_id, pg.usuario_id) AS usuario_id,
        COALESCE(comp.metodo_pago_id, pg.metodo_pago_id) AS metodo_pago_id,
@@ -127,7 +128,7 @@ async function list(query) {
 async function summary(query) {
   const { where, params } = buildFilters(query);
   const [documents] = await db.query(
-    `SELECT comp.id, comp.tipo, comp.total, pg.id AS pago_id, pg.monto,
+    `SELECT comp.id, comp.tipo, comp.total, pg.id AS pago_id, pg.monto, pg.estado AS pago_estado,
             mp.id AS metodo_id, mp.nombre AS metodo_nombre
      ${baseFrom()} WHERE ${where}`,
     params
@@ -143,7 +144,7 @@ async function summary(query) {
     type.cantidad += 1;
     type.total += sign * Number(row.total || 0);
     typeMap.set(row.tipo, type);
-    if (row.pago_id && !paymentMap.has(row.pago_id)) {
+    if (row.pago_id && row.pago_estado === 'ACTIVO' && !paymentMap.has(row.pago_id)) {
       paymentMap.set(row.pago_id, Number(row.monto || 0));
       const method = methodMap.get(row.metodo_id) || {
         id: row.metodo_id,

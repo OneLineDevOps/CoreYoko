@@ -60,7 +60,7 @@ async function updateEstado(req, res) {
 
 async function remove(req, res) {
   try {
-    await pedidoService.deletePedido(req.params.id);
+    await pedidoService.deletePedido(req.params.id, req.user?.id || null);
     res.json({ ok: true });
   } catch (err) {
     console.error(err);

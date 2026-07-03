@@ -36,7 +36,9 @@ async function recalculateCuenta(cuentaId, conn = db.pool) {
 
 async function listByPedido(pedidoId) {
   const [rows] = await db.query(
-    'SELECT * FROM cuentas WHERE pedido_id = ? ORDER BY id',
+    `SELECT * FROM cuentas
+     WHERE pedido_id = ? AND estado <> 'ANULADA'
+     ORDER BY id`,
     [pedidoId]
   );
   return rows;
@@ -194,11 +196,31 @@ async function remove(id) {
       throw err;
     }
 
-    const [comps] = await conn.execute('SELECT id FROM comprobantes WHERE cuenta_id = ? LIMIT 1', [id]);
-    if (comps && comps.length) {
+    const [activeComps] = await conn.execute(
+      `SELECT id
+       FROM comprobantes
+       WHERE cuenta_id = ?
+         AND tipo <> 'NOTA_CREDITO'
+         AND estado <> 'ANULADO'
+       LIMIT 1`,
+      [id]
+    );
+    if (activeComps && activeComps.length) {
       const err = new Error('La cuenta ya tiene comprobante emitido');
       err.code = 'INVALID_STATE';
       throw err;
+    }
+
+    const [allComps] = await conn.execute(
+      'SELECT id FROM comprobantes WHERE cuenta_id = ? LIMIT 1',
+      [id]
+    );
+    if (allComps && allComps.length) {
+      // Se conserva la cuenta como vínculo de auditoría del comprobante anulado,
+      // pero deja de participar en Caja y libera sus ítems para una cuenta nueva.
+      await conn.execute('UPDATE cuentas SET estado = "ANULADA" WHERE id = ?', [id]);
+      await conn.commit();
+      return { id: Number(id), deleted: true, soft_deleted: true };
     }
 
     await conn.execute('DELETE FROM cuenta_detalles WHERE cuenta_id = ?', [id]);
@@ -217,7 +239,7 @@ async function allPedidoCuentasClosed(pedidoId) {
   const [rows] = await db.query(
     `SELECT COUNT(*) AS total,
             SUM(CASE WHEN estado = 'ABIERTA' THEN 1 ELSE 0 END) AS abiertas
-     FROM cuentas WHERE pedido_id = ?`,
+     FROM cuentas WHERE pedido_id = ? AND estado <> 'ANULADA'`,
     [pedidoId]
   );
   const row = rows[0] || {};

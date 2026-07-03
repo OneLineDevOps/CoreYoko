@@ -106,7 +106,7 @@ router.post('/:id/anular', ...documentAccess, async (req, res) => {
     const access = await canAccessFiscalDocument(req, req.params.id);
     if (access === null) return res.status(404).json({ error: 'Comprobante no encontrado' });
     if (access === false) return res.status(403).json({ error: 'Comprobante fuera de su restaurante' });
-    const created = await comprobanteService.createCreditNote(req.params.id, {
+    const created = await comprobanteService.cancelPayment(req.params.id, {
       motivo_descripcion: req.body?.motivo_descripcion,
       sesion_caja_id: req.body?.sesion_caja_id,
       usuario_id: req.user.id,

@@ -312,6 +312,64 @@ function resultMessage(result) {
   ).slice(0, 1000);
 }
 
+async function reverseAcceptedCreditNote(creditNoteId) {
+  const [rows] = await db.query(
+    `SELECT nota.id, nota.usuario_id, nota.motivo_descripcion,
+            original.id AS original_id, original.cuenta_id, original.metodo_pago_id, original.total,
+            cu.pedido_id, ped.mesa_id
+     FROM comprobantes nota
+     JOIN comprobantes original ON original.id = nota.comprobante_referencia_id
+     LEFT JOIN cuentas cu ON cu.id = original.cuenta_id
+     LEFT JOIN pedidos ped ON ped.id = cu.pedido_id
+     WHERE nota.id = ? AND nota.tipo = 'NOTA_CREDITO'
+     LIMIT 1`,
+    [creditNoteId]
+  );
+  const context = rows?.[0];
+  if (!context) return;
+  const [paymentResult] = await db.pool.execute(
+    `UPDATE pagos pg
+     SET pg.estado = 'ANULADO',
+         pg.motivo_anulacion = ?,
+         pg.anulado_at = NOW(),
+         pg.anulado_por = ?
+     WHERE pg.estado = 'ACTIVO'
+       AND (
+         pg.comprobante_id = ?
+         OR (
+           ? IS NOT NULL
+           AND pg.pedido_id = ?
+           AND pg.metodo_pago_id = ?
+           AND ABS(pg.monto - ?) < 0.01
+         )
+       )`,
+    [
+      context.motivo_descripcion || 'Anulación mediante nota de crédito',
+      context.usuario_id || null,
+      context.original_id,
+      context.pedido_id,
+      context.pedido_id,
+      context.metodo_pago_id,
+      context.total,
+    ]
+  );
+  if (!paymentResult.affectedRows || !context.cuenta_id || !context.pedido_id) return;
+  await db.pool.execute('UPDATE cuentas SET estado = "ABIERTA" WHERE id = ?', [context.cuenta_id]);
+  await db.pool.execute('UPDATE pedidos SET estado = "LISTO" WHERE id = ?', [context.pedido_id]);
+  if (context.mesa_id) {
+    await db.pool.execute('UPDATE mesas SET estado = "OCUPADA" WHERE id = ?', [context.mesa_id]);
+  }
+  await db.pool.execute(
+    `INSERT INTO historial_estado_pedido (pedido_id, estado, usuario_id, observacion)
+     VALUES (?, 'LISTO', ?, ?)`,
+    [
+      context.pedido_id,
+      context.usuario_id || null,
+      `Pago anulado mediante nota de crédito: ${context.motivo_descripcion || 'Anulación de la operación'}`,
+    ]
+  );
+}
+
 async function finishJob(job, outcome) {
   const responseJson = outcome.response === undefined
     ? null
@@ -338,6 +396,7 @@ async function finishJob(job, outcome) {
        WHERE nota.id = ? AND nota.tipo = 'NOTA_CREDITO'`,
       [job.comprobante_id]
     );
+    await reverseAcceptedCreditNote(job.comprobante_id);
     return;
   }
   if (outcome.status === 'RECHAZADO') {

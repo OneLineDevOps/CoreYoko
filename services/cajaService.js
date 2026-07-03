@@ -30,6 +30,7 @@ async function getActiveBySucursal(sucursalId) {
      LEFT JOIN (
        SELECT sesion_caja_id, SUM(monto) AS total_pagos
        FROM pagos
+       WHERE estado = 'ACTIVO'
        GROUP BY sesion_caja_id
      ) pg ON pg.sesion_caja_id = sc.id
      WHERE sc.sucursal_id = ? AND sc.estado = 'ABIERTA'
@@ -58,6 +59,7 @@ async function getById(id) {
      LEFT JOIN (
        SELECT sesion_caja_id, SUM(monto) AS total_pagos
        FROM pagos
+       WHERE estado = 'ACTIVO'
        GROUP BY sesion_caja_id
      ) pg ON pg.sesion_caja_id = sc.id
      WHERE sc.id = ?
@@ -98,6 +100,7 @@ async function getSummary(sessionId) {
      FROM pagos p
      LEFT JOIN metodos_pago mp ON mp.id = p.metodo_pago_id
      WHERE p.sesion_caja_id = ?
+       AND p.estado = 'ACTIVO'
      GROUP BY mp.id, mp.nombre
      ORDER BY mp.nombre`,
     [sessionId]
@@ -119,6 +122,7 @@ async function getSummary(sessionId) {
      LEFT JOIN clientes cli ON cli.id = ped.cliente_id
      LEFT JOIN usuarios u ON u.id = p.usuario_id
      WHERE p.sesion_caja_id = ?
+       AND p.estado = 'ACTIVO'
      ORDER BY p.fecha_pago DESC`,
     [sessionId]
   );

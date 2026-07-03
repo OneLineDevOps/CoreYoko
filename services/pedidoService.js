@@ -338,7 +338,7 @@ async function listPedidosBySucursal(sucursal_id, estado) {
   return rows;
 }
 
-async function deletePedido(pedidoId) {
+async function deletePedido(pedidoId, usuarioId = null) {
   const conn = await db.getConnection();
   let sucursalCodigo = null;
   try {
@@ -358,7 +358,7 @@ async function deletePedido(pedidoId) {
       err.code = 'NOT_FOUND';
       throw err;
     }
-    if (['ENTREGADO', 'ANULADO'].includes(String(pedido.estado).toUpperCase())) {
+    if (String(pedido.estado).toUpperCase() === 'ANULADO') {
       const err = new Error('No se puede eliminar un pedido cerrado');
       err.code = 'ORDER_CLOSED';
       throw err;
@@ -368,18 +368,68 @@ async function deletePedido(pedidoId) {
       `SELECT
          EXISTS(SELECT 1 FROM pagos WHERE pedido_id = ? LIMIT 1) AS tiene_pagos,
          EXISTS(
+           SELECT 1 FROM pagos
+           WHERE pedido_id = ? AND estado <> 'ANULADO'
+           LIMIT 1
+         ) AS tiene_pagos_activos,
+         EXISTS(
            SELECT 1
            FROM comprobantes comp
            JOIN cuentas c ON c.id = comp.cuenta_id
            WHERE c.pedido_id = ?
            LIMIT 1
-         ) AS tiene_comprobantes`,
-      [pedidoId, pedidoId]
+         ) AS tiene_comprobantes,
+         EXISTS(
+           SELECT 1
+           FROM comprobantes comp
+           JOIN cuentas c ON c.id = comp.cuenta_id
+           WHERE c.pedido_id = ?
+             AND comp.tipo IN ('NOTA_PEDIDO', 'BOLETA', 'FACTURA')
+             AND comp.estado <> 'ANULADO'
+           LIMIT 1
+         ) AS tiene_comprobantes_activos`,
+      [pedidoId, pedidoId, pedidoId, pedidoId]
     );
-    if (Number(financialRows?.[0]?.tiene_pagos) || Number(financialRows?.[0]?.tiene_comprobantes)) {
+    const financial = financialRows?.[0] || {};
+    if (Number(financial.tiene_pagos_activos) || Number(financial.tiene_comprobantes_activos)) {
       const err = new Error('No se puede eliminar un pedido que ya tiene pagos o comprobantes');
       err.code = 'ORDER_HAS_FINANCIAL_RECORDS';
       throw err;
+    }
+
+    const hasAuditRecords = Number(financial.tiene_pagos) || Number(financial.tiene_comprobantes);
+    if (hasAuditRecords) {
+      await conn.execute('UPDATE cuentas SET estado = "ANULADA" WHERE pedido_id = ?', [pedidoId]);
+      await conn.execute('UPDATE pedidos SET estado = "ANULADO" WHERE id = ?', [pedidoId]);
+      await conn.execute(
+        `INSERT INTO historial_estado_pedido (pedido_id, estado, usuario_id, observacion)
+         VALUES (?, 'ANULADO', ?, 'Pedido eliminado después de anular sus pagos')`,
+        [pedidoId, usuarioId]
+      );
+
+      if (pedido.mesa_id) {
+        const [otherOpenOrders] = await conn.execute(
+          `SELECT id FROM pedidos
+           WHERE mesa_id = ? AND id <> ? AND estado NOT IN ('ENTREGADO', 'ANULADO')
+           LIMIT 1`,
+          [pedido.mesa_id, pedidoId]
+        );
+        if (!otherOpenOrders?.length) {
+          await conn.execute(
+            `UPDATE mesas SET estado = 'LIBRE'
+             WHERE id = ? AND estado <> 'RESERVADA'`,
+            [pedido.mesa_id]
+          );
+        }
+      }
+
+      sucursalCodigo = pedido.sucursal_codigo;
+      await conn.commit();
+      ws.broadcastToSucursal(sucursalCodigo, {
+        type: 'pedido_eliminado',
+        data: { id: Number(pedidoId), sucursal_codigo: sucursalCodigo }
+      });
+      return { archived: true };
     }
 
     await conn.execute(

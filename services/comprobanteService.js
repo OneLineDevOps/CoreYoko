@@ -501,6 +501,125 @@ async function createCreditNote(referenceId, {
   }
 }
 
+async function cancelOrderDocument(referenceId, {
+  motivo_descripcion,
+  usuario_id = null,
+} = {}) {
+  const reason = String(motivo_descripcion || '').trim();
+  if (reason.length < 3) {
+    const err = new Error('Ingrese el motivo de la anulación');
+    err.code = 'INVALID_INPUT';
+    throw err;
+  }
+  const conn = await db.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [rows] = await conn.execute(
+      `SELECT comp.*, cu.pedido_id, ped.mesa_id
+       FROM comprobantes comp
+       JOIN cuentas cu ON cu.id = comp.cuenta_id
+       JOIN pedidos ped ON ped.id = cu.pedido_id
+       WHERE comp.id = ?
+       LIMIT 1
+       FOR UPDATE`,
+      [referenceId]
+    );
+    const document = rows?.[0];
+    if (!document) {
+      const err = new Error('Comprobante no encontrado');
+      err.code = 'NOT_FOUND';
+      throw err;
+    }
+    if (document.tipo !== 'NOTA_PEDIDO') {
+      const err = new Error('Este comprobante requiere una nota de crédito');
+      err.code = 'INVALID_INPUT';
+      throw err;
+    }
+    if (document.estado === 'ANULADO') {
+      const err = new Error('El pago ya está anulado');
+      err.code = 'INVALID_STATE';
+      throw err;
+    }
+    const [payments] = await conn.execute(
+      `SELECT pg.id
+       FROM pagos pg
+       WHERE pg.estado = 'ACTIVO'
+         AND (
+           pg.comprobante_id = ?
+           OR (
+             pg.pedido_id = ?
+             AND pg.metodo_pago_id = ?
+             AND ABS(pg.monto - ?) < 0.01
+           )
+         )
+       ORDER BY pg.id DESC
+       LIMIT 1
+       FOR UPDATE`,
+      [document.id, document.pedido_id, document.metodo_pago_id, document.total]
+    );
+    const payment = payments?.[0];
+    if (!payment) {
+      const err = new Error('No se encontró un pago activo para anular');
+      err.code = 'INVALID_STATE';
+      throw err;
+    }
+    await conn.execute(
+      `UPDATE pagos
+       SET estado = 'ANULADO', motivo_anulacion = ?, anulado_at = NOW(), anulado_por = ?
+       WHERE id = ?`,
+      [reason, usuario_id, payment.id]
+    );
+    await conn.execute(
+      `UPDATE comprobantes
+       SET estado = 'ANULADO', motivo_codigo = '01', motivo_descripcion = ?
+       WHERE id = ?`,
+      [reason, document.id]
+    );
+    await conn.execute('UPDATE cuentas SET estado = "ABIERTA" WHERE id = ?', [document.cuenta_id]);
+    await conn.execute('UPDATE pedidos SET estado = "LISTO" WHERE id = ?', [document.pedido_id]);
+    if (document.mesa_id) {
+      await conn.execute('UPDATE mesas SET estado = "OCUPADA" WHERE id = ?', [document.mesa_id]);
+    }
+    await conn.execute(
+      `INSERT INTO historial_estado_pedido (pedido_id, estado, usuario_id, observacion)
+       VALUES (?, 'LISTO', ?, ?)`,
+      [document.pedido_id, usuario_id, `Pago anulado: ${reason}`]
+    );
+    await conn.commit();
+    return {
+      tipo_anulacion: 'DIRECTA',
+      comprobante_id: Number(document.id),
+      pago_id: Number(payment.id),
+      pedido_id: Number(document.pedido_id),
+      estado: 'ANULADO',
+    };
+  } catch (error) {
+    await conn.rollback();
+    throw error;
+  } finally {
+    conn.release();
+  }
+}
+
+async function cancelPayment(referenceId, payload = {}) {
+  const document = await getById(referenceId);
+  if (!document) {
+    const err = new Error('Comprobante no encontrado');
+    err.code = 'NOT_FOUND';
+    throw err;
+  }
+  if (document.tipo === 'NOTA_PEDIDO') {
+    return cancelOrderDocument(referenceId, payload);
+  }
+  if (['BOLETA', 'FACTURA'].includes(document.tipo)) {
+    const note = await createCreditNote(referenceId, payload);
+    return { ...note, tipo_anulacion: 'NOTA_CREDITO' };
+  }
+  const err = new Error('Este comprobante no admite anulación de pago');
+  err.code = 'INVALID_INPUT';
+  throw err;
+}
+
 async function getById(id) {
   const [rows] = await db.query(
     `SELECT comp.*, c.pedido_id, p.numero AS pedido_numero, p.mesa_id,
@@ -675,6 +794,7 @@ module.exports = {
   createWithConnection,
   createDirect,
   createCreditNote,
+  cancelPayment,
   nextSerie,
   getById,
   renderPrintText,

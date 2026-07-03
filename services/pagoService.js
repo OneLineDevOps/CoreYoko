@@ -109,7 +109,7 @@ async function processPayment({
     let [comprobanteRows] = await conn.execute(
       `SELECT id, total
        FROM comprobantes
-       WHERE cuenta_id = ? AND estado <> 'ANULADO'
+       WHERE cuenta_id = ? AND estado <> 'ANULADO' AND tipo <> 'NOTA_CREDITO'
        ORDER BY id DESC
        LIMIT 1`,
       [cuenta_id]
@@ -132,6 +132,7 @@ async function processPayment({
       `SELECT pg.id
        FROM pagos pg
        WHERE (pg.comprobante_id = ? OR pg.pedido_id = ?)
+         AND pg.estado = 'ACTIVO'
          AND pg.metodo_pago_id = ?
          AND ABS(pg.monto - ?) < 0.01
          AND pg.sesion_caja_id = ?
