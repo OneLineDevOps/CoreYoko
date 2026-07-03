@@ -52,15 +52,16 @@ async function getCuentaDetalles(cuentaId, conn = db.pool) {
   return rows || [];
 }
 
-async function nextSerie(tipo, restauranteId, conn) {
+async function nextSerie(tipo, restauranteId, conn, options = {}) {
+  const referenceType = String(options.referenceType || '').toUpperCase();
   const seriesPrefix = tipo === 'FACTURA'
     ? 'F'
     : tipo === 'BOLETA'
       ? 'B'
       : tipo === 'NOTA_CREDITO'
-        ? 'NC'
+        ? (referenceType === 'FACTURA' ? 'FC' : 'BC')
         : 'NP';
-  const lockName = `serie-comprobante-${tipo}`;
+  const lockName = `serie-comprobante-${restauranteId}-${tipo}-${seriesPrefix}`;
   const [lockRows] = await conn.query('SELECT GET_LOCK(?, 5) AS acquired', [lockName]);
   if (!lockRows?.[0] || Number(lockRows[0].acquired) !== 1) {
     const err = new Error('No se pudo reservar la numeración del comprobante');
@@ -72,10 +73,15 @@ async function nextSerie(tipo, restauranteId, conn) {
     const [rows] = await conn.execute(
       `SELECT * FROM series_comprobante
        WHERE tipo = ? AND restaurante_id = ? AND activo = 1
+         AND serie REGEXP ?
        ORDER BY id
        LIMIT 1
        FOR UPDATE`,
-      [tipo, restauranteId]
+      [
+        tipo,
+        restauranteId,
+        tipo === 'NOTA_CREDITO' ? `^${seriesPrefix}[A-Z0-9]{2}$` : `^${seriesPrefix}[0-9]{3}$`,
+      ]
     );
 
     let serie = rows?.[0] || null;
@@ -90,11 +96,11 @@ async function nextSerie(tipo, restauranteId, conn) {
         [
           seriesPrefix.length + 1,
           tipo,
-          `^${seriesPrefix}[0-9]{3}$`
+          tipo === 'NOTA_CREDITO' ? `^${seriesPrefix}[0-9]{2}$` : `^${seriesPrefix}[0-9]{3}$`
         ]
       );
       const sequence = Number(numberRows?.[0]?.siguiente || 1);
-      const serieCode = `${seriesPrefix}${String(sequence).padStart(3, '0')}`;
+      const serieCode = `${seriesPrefix}${String(sequence).padStart(tipo === 'NOTA_CREDITO' ? 2 : 3, '0')}`;
       const [res] = await conn.execute(
         `INSERT INTO series_comprobante
          (restaurante_id, tipo, serie, ultimo_numero, activo)
@@ -171,10 +177,12 @@ async function createWithConnection(
 
     const [res] = await conn.execute(
       `INSERT INTO comprobantes
-       (cuenta_id, cliente_id, tipo, serie, numero, fecha_emision, subtotal, descuento, igv, total, metodo_pago_id, estado)
-       VALUES (?, ?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?, 'EMITIDO')`,
+       (cuenta_id, sucursal_id, cliente_id, tipo, serie, numero, fecha_emision,
+        subtotal, descuento, igv, total, metodo_pago_id, sesion_caja_id, origen, estado)
+       VALUES (?, ?, ?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?, ?, 'PEDIDO', 'EMITIDO')`,
       [
         cuenta_id,
+        cuenta.sucursal_id,
         clienteId,
         tipo,
         numeracion.serie,
@@ -183,7 +191,8 @@ async function createWithConnection(
         descuento.toFixed(2),
         igv.toFixed(2),
         total.toFixed(2),
-        metodo_pago_id || null
+        metodo_pago_id || null,
+        activeSession.id,
       ]
     );
     const comprobanteId = res.insertId;
@@ -233,29 +242,297 @@ async function create(payload) {
   }
 }
 
+function validateFiscalClient(tipo, client) {
+  if (!client) {
+    const err = new Error('Seleccione un cliente válido');
+    err.code = 'INVALID_INPUT';
+    throw err;
+  }
+  if (tipo === 'FACTURA' && (
+    String(client.tipo_documento || '').toUpperCase() !== 'RUC'
+    || !/^\d{11}$/.test(String(client.numero_documento || ''))
+  )) {
+    const err = new Error('La factura requiere un cliente con RUC válido');
+    err.code = 'INVALID_INPUT';
+    throw err;
+  }
+}
+
+async function createDirect({
+  sucursal_id,
+  sesion_caja_id,
+  cliente_id,
+  tipo,
+  metodo_pago_id,
+  detalles,
+  observacion,
+  usuario_id,
+}) {
+  if (!['BOLETA', 'FACTURA'].includes(tipo) || !sucursal_id || !sesion_caja_id || !cliente_id || !metodo_pago_id) {
+    const err = new Error('Complete sucursal, caja, cliente, tipo y método de pago');
+    err.code = 'INVALID_INPUT';
+    throw err;
+  }
+  const normalizedDetails = (Array.isArray(detalles) ? detalles : []).map((detail) => ({
+    descripcion: String(detail.descripcion || '').trim(),
+    cantidad: Number(detail.cantidad || 0),
+    precio_unitario: money(detail.precio_unitario),
+  }));
+  if (!normalizedDetails.length || normalizedDetails.some((detail) => (
+    !detail.descripcion || detail.cantidad <= 0 || detail.precio_unitario <= 0
+  ))) {
+    const err = new Error('Agregue al menos un ítem con descripción, cantidad y precio válidos');
+    err.code = 'INVALID_INPUT';
+    throw err;
+  }
+
+  const conn = await db.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [[branch]] = await conn.execute(
+      'SELECT id, restaurante_id FROM sucursales WHERE id = ? AND activo = 1 LIMIT 1',
+      [sucursal_id]
+    );
+    const [[client]] = await conn.execute('SELECT * FROM clientes WHERE id = ? LIMIT 1', [cliente_id]);
+    const [[method]] = await conn.execute(
+      'SELECT id FROM metodos_pago WHERE id = ? AND activo = 1 LIMIT 1',
+      [metodo_pago_id]
+    );
+    const activeSession = await cajaService.getById(sesion_caja_id);
+    if (!branch || !method) {
+      const err = new Error('Sucursal o método de pago no disponible');
+      err.code = 'INVALID_INPUT';
+      throw err;
+    }
+    if (!activeSession || activeSession.estado !== 'ABIERTA' || Number(activeSession.sucursal_id) !== Number(sucursal_id)) {
+      const err = new Error('La caja seleccionada no está abierta para esta sucursal');
+      err.code = 'CAJA_NO_ABIERTA';
+      throw err;
+    }
+    validateFiscalClient(tipo, client);
+
+    const total = money(normalizedDetails.reduce(
+      (sum, detail) => sum + detail.cantidad * detail.precio_unitario,
+      0
+    ));
+    const subtotal = money(total / (1 + config.igv));
+    const igv = money(total - subtotal);
+    const numeracion = await nextSerie(tipo, branch.restaurante_id, conn);
+    const [result] = await conn.execute(
+      `INSERT INTO comprobantes
+       (cuenta_id, sucursal_id, cliente_id, tipo, serie, numero, fecha_emision,
+        subtotal, descuento, igv, total, metodo_pago_id, sesion_caja_id, usuario_id,
+        origen, motivo_descripcion, estado)
+       VALUES (NULL, ?, ?, ?, ?, ?, NOW(), ?, 0, ?, ?, ?, ?, ?, 'FACTURADOR', ?, 'EMITIDO')`,
+      [
+        sucursal_id,
+        cliente_id,
+        tipo,
+        numeracion.serie,
+        numeracion.numero,
+        subtotal.toFixed(2),
+        igv.toFixed(2),
+        total.toFixed(2),
+        metodo_pago_id,
+        sesion_caja_id,
+        usuario_id || null,
+        observacion || null,
+      ]
+    );
+    const comprobanteId = result.insertId;
+    for (const detail of normalizedDetails) {
+      await conn.execute(
+        `INSERT INTO comprobante_detalles
+         (comprobante_id, producto_id, descripcion, cantidad, precio_unitario, subtotal)
+         VALUES (?, NULL, ?, ?, ?, ?)`,
+        [
+          comprobanteId,
+          detail.descripcion,
+          detail.cantidad,
+          detail.precio_unitario.toFixed(2),
+          money(detail.cantidad * detail.precio_unitario).toFixed(2),
+        ]
+      );
+    }
+    await conn.execute(
+      `INSERT INTO pagos
+       (pedido_id, comprobante_id, metodo_pago_id, monto, referencia, usuario_id, sesion_caja_id)
+       VALUES (NULL, ?, ?, ?, ?, ?, ?)`,
+      [
+        comprobanteId,
+        metodo_pago_id,
+        total.toFixed(2),
+        `Facturador ${tipo} ${numeracion.serie}-${numeracion.numero}`,
+        usuario_id || null,
+        sesion_caja_id,
+      ]
+    );
+    await sunatService.enqueueComprobante(comprobanteId, conn);
+    await conn.commit();
+    const receipt = await getById(comprobanteId);
+    try {
+      await trabajoImpresionService.enqueueReceipt(receipt);
+    } catch (printError) {
+      console.error('No se pudo encolar el comprobante directo', printError);
+    }
+    return receipt;
+  } catch (error) {
+    await conn.rollback();
+    throw error;
+  } finally {
+    conn.release();
+  }
+}
+
+async function createCreditNote(referenceId, {
+  motivo_descripcion,
+  sesion_caja_id = null,
+  usuario_id = null,
+} = {}) {
+  const reason = String(motivo_descripcion || '').trim();
+  if (reason.length < 3) {
+    const err = new Error('Ingrese el motivo de la anulación');
+    err.code = 'INVALID_INPUT';
+    throw err;
+  }
+  const conn = await db.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [rows] = await conn.execute(
+      `SELECT comp.*, COALESCE(comp.sucursal_id, ped.sucursal_id) AS sucursal_id_resuelta,
+              s.restaurante_id
+       FROM comprobantes comp
+       LEFT JOIN cuentas cu ON cu.id = comp.cuenta_id
+       LEFT JOIN pedidos ped ON ped.id = cu.pedido_id
+       JOIN sucursales s ON s.id = COALESCE(comp.sucursal_id, ped.sucursal_id)
+       WHERE comp.id = ?
+       LIMIT 1
+       FOR UPDATE`,
+      [referenceId]
+    );
+    const reference = rows?.[0];
+    if (!reference) {
+      const err = new Error('Comprobante no encontrado');
+      err.code = 'NOT_FOUND';
+      throw err;
+    }
+    if (!['BOLETA', 'FACTURA'].includes(reference.tipo)) {
+      const err = new Error('Solo se pueden anular boletas y facturas mediante nota de crédito');
+      err.code = 'INVALID_INPUT';
+      throw err;
+    }
+    if (reference.estado === 'ANULADO') {
+      const err = new Error('El comprobante ya está anulado');
+      err.code = 'INVALID_STATE';
+      throw err;
+    }
+    if (reference.sunat_estado !== 'ACEPTADO') {
+      const err = new Error('Solo se puede anular un comprobante aceptado por SUNAT');
+      err.code = 'INVALID_STATE';
+      throw err;
+    }
+    const [existing] = await conn.execute(
+      `SELECT id, sunat_estado
+       FROM comprobantes
+       WHERE comprobante_referencia_id = ?
+         AND tipo = 'NOTA_CREDITO'
+         AND sunat_estado NOT IN ('RECHAZADO')
+       ORDER BY id DESC LIMIT 1`,
+      [referenceId]
+    );
+    if (existing?.length) {
+      const err = new Error('Ya existe una nota de crédito para este comprobante');
+      err.code = 'INVALID_STATE';
+      throw err;
+    }
+
+    const numeracion = await nextSerie(
+      'NOTA_CREDITO',
+      reference.restaurante_id,
+      conn,
+      { referenceType: reference.tipo }
+    );
+    const [result] = await conn.execute(
+      `INSERT INTO comprobantes
+       (cuenta_id, sucursal_id, cliente_id, tipo, serie, numero, fecha_emision,
+        subtotal, descuento, igv, total, metodo_pago_id, sesion_caja_id, usuario_id,
+        origen, estado, comprobante_referencia_id, motivo_codigo, motivo_descripcion)
+       VALUES (?, ?, ?, 'NOTA_CREDITO', ?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?,
+               'ANULACION', 'EMITIDO', ?, '01', ?)`,
+      [
+        reference.cuenta_id,
+        reference.sucursal_id_resuelta,
+        reference.cliente_id,
+        numeracion.serie,
+        numeracion.numero,
+        reference.subtotal,
+        reference.descuento,
+        reference.igv,
+        reference.total,
+        reference.metodo_pago_id,
+        sesion_caja_id || reference.sesion_caja_id || null,
+        usuario_id,
+        reference.id,
+        reason,
+      ]
+    );
+    await conn.execute(
+      `INSERT INTO comprobante_detalles
+       (comprobante_id, producto_id, descripcion, cantidad, precio_unitario, subtotal)
+       SELECT ?, producto_id, descripcion, cantidad, precio_unitario, subtotal
+       FROM comprobante_detalles
+       WHERE comprobante_id = ?`,
+      [result.insertId, reference.id]
+    );
+    await sunatService.enqueueComprobante(result.insertId, conn);
+    await conn.commit();
+    const creditNote = await getById(result.insertId);
+    try {
+      await trabajoImpresionService.enqueueReceipt(creditNote);
+    } catch (printError) {
+      console.error('No se pudo encolar la nota de crédito', printError);
+    }
+    return creditNote;
+  } catch (error) {
+    await conn.rollback();
+    throw error;
+  } finally {
+    conn.release();
+  }
+}
+
 async function getById(id) {
   const [rows] = await db.query(
-    `SELECT comp.*, c.pedido_id, p.numero AS pedido_numero, p.mesa_id, p.sucursal_id,
+    `SELECT comp.*, c.pedido_id, p.numero AS pedido_numero, p.mesa_id,
+            COALESCE(comp.sucursal_id, p.sucursal_id) AS sucursal_id,
             COALESCE(m.codigo, p.mesa_temporal_codigo) AS mesa_codigo,
-            (
+            COALESCE(comp.sesion_caja_id, (
               SELECT pg.sesion_caja_id
               FROM pagos pg
-              WHERE pg.pedido_id = c.pedido_id
+              WHERE pg.comprobante_id = comp.id OR pg.pedido_id = c.pedido_id
                 AND pg.sesion_caja_id IS NOT NULL
               ORDER BY pg.fecha_pago DESC, pg.id DESC
               LIMIT 1
-            ) AS sesion_caja_id,
+            )) AS sesion_caja_id,
             s.nombre AS sucursal_nombre, s.direccion AS sucursal_direccion, s.telefono AS sucursal_telefono,
             r.id AS restaurante_id, r.nombre AS restaurante_nombre, r.ruc AS restaurante_ruc,
             r.direccion AS restaurante_direccion, r.telefono AS restaurante_telefono,
-            cli.tipo_documento, cli.numero_documento, cli.razon_social, cli.nombres, cli.apellidos
+            cli.tipo_documento, cli.numero_documento, cli.razon_social, cli.nombres, cli.apellidos,
+            ref.tipo AS referencia_tipo, ref.serie AS referencia_serie, ref.numero AS referencia_numero,
+            nc.id AS nota_credito_id, nc.sunat_estado AS nota_credito_sunat_estado
      FROM comprobantes comp
      LEFT JOIN cuentas c ON c.id = comp.cuenta_id
      LEFT JOIN pedidos p ON p.id = c.pedido_id
      LEFT JOIN mesas m ON m.id = p.mesa_id
-     LEFT JOIN sucursales s ON s.id = p.sucursal_id
+     LEFT JOIN sucursales s ON s.id = COALESCE(comp.sucursal_id, p.sucursal_id)
      LEFT JOIN restaurantes r ON r.id = s.restaurante_id
      LEFT JOIN clientes cli ON cli.id = comp.cliente_id
+     LEFT JOIN comprobantes ref ON ref.id = comp.comprobante_referencia_id
+     LEFT JOIN comprobantes nc ON nc.id = (
+       SELECT nc2.id FROM comprobantes nc2
+       WHERE nc2.comprobante_referencia_id = comp.id AND nc2.tipo = 'NOTA_CREDITO'
+       ORDER BY nc2.id DESC LIMIT 1
+     )
      WHERE comp.id = ?
      LIMIT 1`,
     [id]
@@ -284,6 +561,10 @@ function renderPrintText(comprobante) {
     comprobante.sesion_caja_id ? `Caja: #${comprobante.sesion_caja_id}` : '',
     comprobante.pedido_numero ? `Pedido: ${comprobante.pedido_numero}` : '',
     comprobante.mesa_codigo ? `Mesa: ${comprobante.mesa_codigo}` : '',
+    comprobante.referencia_serie
+      ? `Comprobante afectado: ${comprobante.referencia_serie}-${comprobante.referencia_numero}`
+      : '',
+    comprobante.motivo_descripcion ? `Motivo: ${comprobante.motivo_descripcion}` : '',
     line,
     `Cliente: ${presentation.customer}`,
     comprobante.numero_documento ? `Documento: ${comprobante.numero_documento}` : '',
@@ -350,6 +631,10 @@ function generatePdfBuffer(comprobante) {
     if (comprobante.sesion_caja_id) writeLine(`Caja: #${comprobante.sesion_caja_id}`);
     if (comprobante.pedido_numero) writeLine(`Pedido: ${comprobante.pedido_numero}`);
     if (comprobante.mesa_codigo) writeLine(`Mesa: ${comprobante.mesa_codigo}`);
+    if (comprobante.referencia_serie) {
+      writeLine(`Comprobante afectado: ${comprobante.referencia_serie}-${comprobante.referencia_numero}`);
+    }
+    if (comprobante.motivo_descripcion) writeLine(`Motivo: ${comprobante.motivo_descripcion}`);
     doc.moveDown(0.2);
     doc.moveTo(16, doc.y).lineTo(210, doc.y).stroke();
     doc.moveDown(0.2);
@@ -385,4 +670,13 @@ function generatePdfBuffer(comprobante) {
   });
 }
 
-module.exports = { create, createWithConnection, nextSerie, getById, renderPrintText, generatePdfBuffer };
+module.exports = {
+  create,
+  createWithConnection,
+  createDirect,
+  createCreditNote,
+  nextSerie,
+  getById,
+  renderPrintText,
+  generatePdfBuffer,
+};

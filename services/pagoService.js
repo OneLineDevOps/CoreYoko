@@ -131,7 +131,7 @@ async function processPayment({
     const [paymentRows] = await conn.execute(
       `SELECT pg.id
        FROM pagos pg
-       WHERE pg.pedido_id = ?
+       WHERE (pg.comprobante_id = ? OR pg.pedido_id = ?)
          AND pg.metodo_pago_id = ?
          AND ABS(pg.monto - ?) < 0.01
          AND pg.sesion_caja_id = ?
@@ -148,6 +148,7 @@ async function processPayment({
        ORDER BY pg.id DESC
        LIMIT 1`,
       [
+        comprobante.id,
         cuenta.pedido_id,
         metodo_pago_id,
         Number(comprobante.total || cuenta.total || 0).toFixed(2),
@@ -161,10 +162,11 @@ async function processPayment({
     if (!pagoId) {
       const [paymentResult] = await conn.execute(
         `INSERT INTO pagos
-         (pedido_id, metodo_pago_id, monto, referencia, usuario_id, sesion_caja_id)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+         (pedido_id, comprobante_id, metodo_pago_id, monto, referencia, usuario_id, sesion_caja_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
         [
           cuenta.pedido_id,
+          comprobante.id,
           metodo_pago_id,
           Number(comprobante.total || cuenta.total || 0).toFixed(2),
           reference,

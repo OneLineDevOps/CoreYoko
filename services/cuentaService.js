@@ -69,7 +69,20 @@ async function getById(id) {
   );
   cuenta.detalles = detalles || [];
   const [comprobantes] = await db.query(
-    'SELECT id, tipo, serie, numero, fecha_emision, total, estado FROM comprobantes WHERE cuenta_id = ? ORDER BY id DESC',
+    `SELECT comp.id, comp.tipo, comp.serie, comp.numero, comp.fecha_emision,
+            comp.total, comp.estado, comp.sunat_estado, comp.sunat_mensaje,
+            comp.comprobante_referencia_id, comp.motivo_codigo, comp.motivo_descripcion,
+            nc.id AS nota_credito_id, nc.serie AS nota_credito_serie,
+            nc.numero AS nota_credito_numero, nc.sunat_estado AS nota_credito_sunat_estado
+     FROM comprobantes comp
+     LEFT JOIN comprobantes nc ON nc.id = (
+       SELECT nc2.id FROM comprobantes nc2
+       WHERE nc2.comprobante_referencia_id = comp.id
+         AND nc2.tipo = 'NOTA_CREDITO'
+       ORDER BY nc2.id DESC LIMIT 1
+     )
+     WHERE comp.cuenta_id = ?
+     ORDER BY comp.id DESC`,
     [id]
   );
   cuenta.comprobantes = comprobantes || [];

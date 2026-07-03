@@ -59,6 +59,10 @@ function formatReceiptTicket(receipt) {
     receipt.sesion_caja_id ? `Caja: #${receipt.sesion_caja_id}` : '',
     receipt.pedido_numero ? `Pedido: ${receipt.pedido_numero}` : '',
     receipt.mesa_codigo ? `Mesa: ${receipt.mesa_codigo}` : '',
+    receipt.referencia_serie
+      ? `Comprobante afectado: ${receipt.referencia_serie}-${receipt.referencia_numero}`
+      : '',
+    receipt.motivo_descripcion ? `Motivo: ${receipt.motivo_descripcion}` : '',
     line,
     `Cliente: ${presentation.customer}`,
     receipt.numero_documento ? `Documento: ${receipt.numero_documento}` : '',

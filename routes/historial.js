@@ -6,7 +6,7 @@ const { requireRoles } = require('../middleware/roleMiddleware');
 const sucursalService = require('../services/sucursalService');
 
 router.use(auth);
-router.use(requireRoles(['ROOT', 'ADMINISTRADOR']));
+router.use(requireRoles(['ROOT', 'ADMINISTRADOR', 'CAJERO']));
 
 router.get('/', async (req, res) => {
   try {

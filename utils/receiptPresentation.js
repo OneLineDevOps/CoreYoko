@@ -70,6 +70,8 @@ function receiptPresentation(receipt = {}) {
     number: `${receipt.serie || ''}-${String(receipt.numero || 0).padStart(8, '0')}`,
     typeLabel: receiptType === 'BOLETA'
       ? 'BOLETA DE VENTA ELECTRONICA'
+      : receiptType === 'NOTA_CREDITO'
+        ? 'NOTA DE CREDITO ELECTRONICA'
       : `${receiptType.replaceAll('_', ' ')} ELECTRONICA`,
     dateTime: formatDateTime(receipt.fecha_emision),
     closingLines: [

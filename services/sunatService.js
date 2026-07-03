@@ -87,7 +87,7 @@ async function getComprobanteContext(comprobanteId) {
     `SELECT
        comp.*,
        c.pedido_id,
-       p.sucursal_id,
+       COALESCE(comp.sucursal_id, p.sucursal_id) AS sucursal_id,
        s.restaurante_id,
        r.nombre AS restaurante_nombre,
        r.ruc AS restaurante_ruc,
@@ -100,9 +100,9 @@ async function getComprobanteContext(comprobanteId) {
        ref.serie AS referencia_serie,
        ref.numero AS referencia_numero
      FROM comprobantes comp
-     JOIN cuentas c ON c.id = comp.cuenta_id
-     JOIN pedidos p ON p.id = c.pedido_id
-     JOIN sucursales s ON s.id = p.sucursal_id
+     LEFT JOIN cuentas c ON c.id = comp.cuenta_id
+     LEFT JOIN pedidos p ON p.id = c.pedido_id
+     JOIN sucursales s ON s.id = COALESCE(comp.sucursal_id, p.sucursal_id)
      JOIN restaurantes r ON r.id = s.restaurante_id
      LEFT JOIN clientes cli ON cli.id = comp.cliente_id
      LEFT JOIN comprobantes ref ON ref.id = comp.comprobante_referencia_id
@@ -224,8 +224,8 @@ async function buildPayload(comprobante) {
       error.code = 'SUNAT_INVALID_DOCUMENT';
       throw error;
     }
-    payload.codMotivo = '01';
-    payload.desMotivo = 'Anulación de comprobante';
+    payload.codMotivo = comprobante.motivo_codigo || '01';
+    payload.desMotivo = comprobante.motivo_descripcion || 'Anulación de comprobante';
     payload.numDocfectado = `${comprobante.referencia_serie}-${comprobante.referencia_numero}`;
     payload.tipDocAfectado = fiscalType(comprobante.referencia_tipo);
     delete payload.formaPago;
@@ -330,6 +330,13 @@ async function finishJob(job, outcome) {
            sunat_enviado_at = COALESCE(sunat_enviado_at, NOW()), sunat_aceptado_at = NOW()
        WHERE id = ?`,
       [outcome.code || null, outcome.message || 'Aceptado por SUNAT', job.comprobante_id]
+    );
+    await db.pool.execute(
+      `UPDATE comprobantes original
+       JOIN comprobantes nota ON nota.comprobante_referencia_id = original.id
+       SET original.estado = 'ANULADO'
+       WHERE nota.id = ? AND nota.tipo = 'NOTA_CREDITO'`,
+      [job.comprobante_id]
     );
     return;
   }

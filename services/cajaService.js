@@ -127,15 +127,17 @@ async function getSummary(sessionId) {
     `SELECT DISTINCT
        comp.id, comp.tipo, comp.serie, comp.numero, comp.fecha_emision,
        comp.total, comp.estado, comp.metodo_pago_id, mp.nombre AS metodo_pago,
-       c.pedido_id, ped.numero AS pedido_numero
+       c.pedido_id, ped.numero AS pedido_numero, comp.origen
      FROM comprobantes comp
-     JOIN cuentas c ON c.id = comp.cuenta_id
-     JOIN pedidos ped ON ped.id = c.pedido_id
-     JOIN pagos p ON p.pedido_id = ped.id AND p.sesion_caja_id = ?
+     LEFT JOIN cuentas c ON c.id = comp.cuenta_id
+     LEFT JOIN pedidos ped ON ped.id = c.pedido_id
+     LEFT JOIN pagos p ON p.comprobante_id = comp.id
      LEFT JOIN metodos_pago mp ON mp.id = comp.metodo_pago_id
-     WHERE comp.estado <> 'ANULADO'
+     WHERE (comp.sesion_caja_id = ? OR p.sesion_caja_id = ?)
+       AND comp.tipo <> 'NOTA_CREDITO'
+       AND comp.estado <> 'ANULADO'
      ORDER BY comp.fecha_emision DESC, comp.id DESC`,
-    [sessionId]
+    [sessionId, sessionId]
   );
 
   return {
