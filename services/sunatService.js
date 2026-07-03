@@ -91,6 +91,7 @@ async function getComprobanteContext(comprobanteId) {
        s.restaurante_id,
        r.nombre AS restaurante_nombre,
        r.ruc AS restaurante_ruc,
+       COALESCE(comp.igv_porcentaje, r.igv_porcentaje, 18) AS igv_porcentaje,
        cli.tipo_documento,
        cli.numero_documento,
        cli.razon_social,
@@ -200,7 +201,8 @@ async function buildPayload(comprobante) {
     details: comprobante.detalles.map((detail) => {
       const quantity = Number(detail.cantidad || 1);
       const grossSubtotal = money(detail.subtotal);
-      const netSubtotal = money(grossSubtotal / 1.18);
+      const igvPercentage = Number(comprobante.igv_porcentaje || 18);
+      const netSubtotal = money(grossSubtotal / (1 + igvPercentage / 100));
       const igv = money(grossSubtotal - netSubtotal);
       return {
         unidad: 'NIU',
@@ -210,7 +212,7 @@ async function buildPayload(comprobante) {
         totalImpuestos: igv,
         mtoBaseIgv: netSubtotal,
         igv,
-        porcentajeIgv: 18,
+        porcentajeIgv: igvPercentage,
         tipAfeIgv: 10,
         descripcion: detail.descripcion || 'Producto',
         mtoValorUnitario: money(netSubtotal / quantity),

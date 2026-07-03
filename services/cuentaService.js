@@ -1,6 +1,6 @@
 'use strict';
 const db = require('../models/db');
-const config = require('../config/db');
+const taxService = require('./taxService');
 
 function money(value) {
   return Number(Number(value || 0).toFixed(2));
@@ -24,14 +24,15 @@ async function recalculateCuenta(cuentaId, conn = db.pool) {
     return acc + unitSubtotal * Number(row.cantidad || 1);
   }, 0);
   const total = money(gross);
-  const subtotal = money(total / (1 + config.igv));
+  const igvPorcentaje = await taxService.getPercentageByCuenta(cuentaId, conn);
+  const { subtotal, igv } = taxService.calculateIncluded(total, igvPorcentaje);
 
   await conn.execute(
     'UPDATE cuentas SET subtotal = ?, total = ? WHERE id = ?',
     [subtotal.toFixed(2), total.toFixed(2), cuentaId]
   );
 
-  return { subtotal, igv: money(total - subtotal), total };
+  return { subtotal, igv, total, igv_porcentaje: igvPorcentaje };
 }
 
 async function listByPedido(pedidoId) {

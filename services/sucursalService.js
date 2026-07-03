@@ -23,9 +23,12 @@ function normalizePayload(data = {}) {
 async function getByRestaurant(restaurante_id, { includeInactive = false } = {}) {
   if (!restaurante_id) return [];
   try {
-    const whereActivo = includeInactive ? '' : 'AND activo = 1';
     const [rows] = await db.query(
-      `SELECT * FROM sucursales WHERE restaurante_id = ? ${whereActivo} ORDER BY id`,
+      `SELECT s.*, r.igv_porcentaje
+       FROM sucursales s
+       JOIN restaurantes r ON r.id = s.restaurante_id
+       WHERE s.restaurante_id = ? ${includeInactive ? '' : 'AND s.activo = 1'}
+       ORDER BY s.id`,
       [restaurante_id]
     );
     return rows;
@@ -37,7 +40,14 @@ async function getByRestaurant(restaurante_id, { includeInactive = false } = {})
 
 async function getById(id) {
   try {
-    const [rows] = await db.query('SELECT * FROM sucursales WHERE id = ? LIMIT 1', [id]);
+    const [rows] = await db.query(
+      `SELECT s.*, r.igv_porcentaje
+       FROM sucursales s
+       JOIN restaurantes r ON r.id = s.restaurante_id
+       WHERE s.id = ?
+       LIMIT 1`,
+      [id]
+    );
     return rows && rows.length ? rows[0] : null;
   } catch (err) {
     return _fallback.sucursales.find(s => Number(s.id) === Number(id)) || null;
@@ -48,7 +58,14 @@ async function getByCode(code) {
   const normalized = code ? String(code).trim().toUpperCase() : '';
   if (!normalized) return null;
   try {
-    const [rows] = await db.query('SELECT * FROM sucursales WHERE UPPER(codigo) = ? AND activo = 1 LIMIT 1', [normalized]);
+    const [rows] = await db.query(
+      `SELECT s.*, r.igv_porcentaje
+       FROM sucursales s
+       JOIN restaurantes r ON r.id = s.restaurante_id
+       WHERE UPPER(s.codigo) = ? AND s.activo = 1
+       LIMIT 1`,
+      [normalized]
+    );
     return rows && rows.length ? rows[0] : null;
   } catch (err) {
     return _fallback.sucursales.find(s => String(s.codigo || '').toUpperCase() === normalized && s.activo === 1) || null;

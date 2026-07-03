@@ -2,11 +2,18 @@
 const db = require('../models/db');
 
 function normalizePayload(data = {}) {
+  const igvPercentage = data.igv_porcentaje === undefined ? 18 : Number(data.igv_porcentaje);
+  if (!Number.isFinite(igvPercentage) || igvPercentage <= 0 || igvPercentage > 100) {
+    const err = new Error('El porcentaje de IGV debe ser mayor a 0 y menor o igual a 100');
+    err.code = 'INVALID_INPUT';
+    throw err;
+  }
   return {
     nombre: data.nombre ? String(data.nombre).trim() : '',
     ruc: data.ruc ? String(data.ruc).trim() : null,
     direccion: data.direccion ? String(data.direccion).trim() : null,
     telefono: data.telefono ? String(data.telefono).trim() : null,
+    igv_porcentaje: Number(igvPercentage.toFixed(2)),
     activo: data.activo === undefined ? 1 : Number(Boolean(data.activo)),
     sunat_activo: data.sunat_activo === undefined ? 0 : Number(Boolean(data.sunat_activo)),
   };
@@ -24,7 +31,7 @@ function validateSunatInput(data = {}) {
 }
 
 function safeSelect(includeCredentials = false) {
-  return `r.id, r.nombre, r.ruc, r.direccion, r.telefono, r.activo,
+  return `r.id, r.nombre, r.ruc, r.direccion, r.telefono, r.igv_porcentaje, r.activo,
     ${includeCredentials ? 'r.sunat_usuario_sol, r.sunat_passphrase, r.sunat_token,' : ''}
     r.sunat_activo,
     CASE
@@ -92,13 +99,14 @@ async function create(data) {
 
   const [res] = await db.pool.execute(
     `INSERT INTO restaurantes
-     (nombre, ruc, direccion, telefono, activo, sunat_usuario_sol, sunat_passphrase, sunat_token, sunat_activo)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     (nombre, ruc, direccion, telefono, igv_porcentaje, activo, sunat_usuario_sol, sunat_passphrase, sunat_token, sunat_activo)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       payload.nombre,
       payload.ruc,
       payload.direccion,
       payload.telefono,
+      payload.igv_porcentaje,
       payload.activo,
       data.sunat_usuario_sol ? String(data.sunat_usuario_sol).trim() : null,
       data.sunat_passphrase ? String(data.sunat_passphrase) : null,
@@ -123,7 +131,7 @@ async function update(id, data) {
 
   await db.pool.execute(
     `UPDATE restaurantes
-     SET nombre = ?, ruc = ?, direccion = ?, telefono = ?, activo = ?,
+     SET nombre = ?, ruc = ?, direccion = ?, telefono = ?, igv_porcentaje = ?, activo = ?,
          sunat_usuario_sol = ?, sunat_passphrase = ?, sunat_token = ?, sunat_activo = ?
      WHERE id = ?`,
     [
@@ -131,6 +139,7 @@ async function update(id, data) {
       payload.ruc,
       payload.direccion,
       payload.telefono,
+      payload.igv_porcentaje,
       payload.activo,
       data.sunat_usuario_sol !== undefined ? (String(data.sunat_usuario_sol).trim() || null) : current.sunat_usuario_sol,
       data.sunat_passphrase !== undefined ? (String(data.sunat_passphrase) || null) : current.sunat_passphrase,

@@ -1,6 +1,5 @@
 'use strict';
 const db = require('../models/db');
-const config = require('../config/db');
 const PDFDocument = require('pdfkit');
 const cajaService = require('./cajaService');
 const {
@@ -11,6 +10,7 @@ const {
 } = require('../utils/receiptPresentation');
 const trabajoImpresionService = require('./trabajoImpresionService');
 const sunatService = require('./sunatService');
+const taxService = require('./taxService');
 
 function money(value) {
   return Number(Number(value || 0).toFixed(2));
@@ -170,16 +170,16 @@ async function createWithConnection(
     const totalCuenta = money(cuenta.total);
     const descuento = money(cuenta.descuento);
     const total = money(totalCuenta - descuento);
-    const subtotal = money(total / (1 + config.igv));
-    const igv = money(total - subtotal);
+    const igvPorcentaje = await taxService.getPercentageByRestaurant(cuenta.restaurante_id, conn);
+    const { subtotal, igv } = taxService.calculateIncluded(total, igvPorcentaje);
     const numeracion = await nextSerie(tipo, cuenta.restaurante_id || 1, conn);
     const clienteId = cliente_id || cuenta.pedido_cliente_id || null;
 
     const [res] = await conn.execute(
       `INSERT INTO comprobantes
        (cuenta_id, sucursal_id, cliente_id, tipo, serie, numero, fecha_emision,
-        subtotal, descuento, igv, total, metodo_pago_id, sesion_caja_id, origen, estado)
-       VALUES (?, ?, ?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?, ?, 'PEDIDO', 'EMITIDO')`,
+        subtotal, descuento, igv, igv_porcentaje, total, metodo_pago_id, sesion_caja_id, origen, estado)
+       VALUES (?, ?, ?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?, 'PEDIDO', 'EMITIDO')`,
       [
         cuenta_id,
         cuenta.sucursal_id,
@@ -190,6 +190,7 @@ async function createWithConnection(
         subtotal.toFixed(2),
         descuento.toFixed(2),
         igv.toFixed(2),
+        igvPorcentaje.toFixed(2),
         total.toFixed(2),
         metodo_pago_id || null,
         activeSession.id,
@@ -290,7 +291,11 @@ async function createDirect({
   try {
     await conn.beginTransaction();
     const [[branch]] = await conn.execute(
-      'SELECT id, restaurante_id FROM sucursales WHERE id = ? AND activo = 1 LIMIT 1',
+      `SELECT s.id, s.restaurante_id, r.igv_porcentaje
+       FROM sucursales s
+       JOIN restaurantes r ON r.id = s.restaurante_id
+       WHERE s.id = ? AND s.activo = 1
+       LIMIT 1`,
       [sucursal_id]
     );
     const [[client]] = await conn.execute('SELECT * FROM clientes WHERE id = ? LIMIT 1', [cliente_id]);
@@ -315,15 +320,15 @@ async function createDirect({
       (sum, detail) => sum + detail.cantidad * detail.precio_unitario,
       0
     ));
-    const subtotal = money(total / (1 + config.igv));
-    const igv = money(total - subtotal);
+    const igvPorcentaje = taxService.normalizePercentage(branch.igv_porcentaje);
+    const { subtotal, igv } = taxService.calculateIncluded(total, igvPorcentaje);
     const numeracion = await nextSerie(tipo, branch.restaurante_id, conn);
     const [result] = await conn.execute(
       `INSERT INTO comprobantes
        (cuenta_id, sucursal_id, cliente_id, tipo, serie, numero, fecha_emision,
-        subtotal, descuento, igv, total, metodo_pago_id, sesion_caja_id, usuario_id,
+        subtotal, descuento, igv, igv_porcentaje, total, metodo_pago_id, sesion_caja_id, usuario_id,
         origen, motivo_descripcion, estado)
-       VALUES (NULL, ?, ?, ?, ?, ?, NOW(), ?, 0, ?, ?, ?, ?, ?, 'FACTURADOR', ?, 'EMITIDO')`,
+       VALUES (NULL, ?, ?, ?, ?, ?, NOW(), ?, 0, ?, ?, ?, ?, ?, ?, 'FACTURADOR', ?, 'EMITIDO')`,
       [
         sucursal_id,
         cliente_id,
@@ -332,6 +337,7 @@ async function createDirect({
         numeracion.numero,
         subtotal.toFixed(2),
         igv.toFixed(2),
+        igvPorcentaje.toFixed(2),
         total.toFixed(2),
         metodo_pago_id,
         sesion_caja_id,
@@ -455,7 +461,7 @@ async function createCreditNote(referenceId, {
     const [result] = await conn.execute(
       `INSERT INTO comprobantes
        (cuenta_id, sucursal_id, cliente_id, tipo, serie, numero, fecha_emision,
-        subtotal, descuento, igv, total, metodo_pago_id, sesion_caja_id, usuario_id,
+        subtotal, descuento, igv, igv_porcentaje, total, metodo_pago_id, sesion_caja_id, usuario_id,
         origen, estado, comprobante_referencia_id, motivo_codigo, motivo_descripcion)
        VALUES (?, ?, ?, 'NOTA_CREDITO', ?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?,
                'ANULACION', 'EMITIDO', ?, '01', ?)`,
@@ -468,6 +474,7 @@ async function createCreditNote(referenceId, {
         reference.subtotal,
         reference.descuento,
         reference.igv,
+        reference.igv_porcentaje,
         reference.total,
         reference.metodo_pago_id,
         sesion_caja_id || reference.sesion_caja_id || null,
@@ -696,7 +703,7 @@ function renderPrintText(comprobante) {
     }),
     line,
     `Op. gravada: S/ ${Number(comprobante.subtotal).toFixed(2)}`,
-    `IGV incluido: S/ ${Number(comprobante.igv).toFixed(2)}`,
+    `IGV incluido (${Number(comprobante.igv_porcentaje || 18)}%): S/ ${Number(comprobante.igv).toFixed(2)}`,
     `TOTAL: S/ ${Number(comprobante.total).toFixed(2)}`,
     line,
     ...presentation.closingLines.map((message) => centerLine(message)),
@@ -777,7 +784,7 @@ function generatePdfBuffer(comprobante) {
     doc.moveTo(16, doc.y).lineTo(210, doc.y).stroke();
     doc.moveDown(0.2);
     writeLine(`Op. gravada: S/ ${Number(comprobante.subtotal).toFixed(2)}`);
-    writeLine(`IGV incluido: S/ ${Number(comprobante.igv).toFixed(2)}`);
+    writeLine(`IGV incluido (${Number(comprobante.igv_porcentaje || 18)}%): S/ ${Number(comprobante.igv).toFixed(2)}`);
     doc.font('Helvetica-Bold').fontSize(11).text(`TOTAL: S/ ${Number(comprobante.total).toFixed(2)}`);
     doc.moveDown(0.2);
     doc.moveTo(16, doc.y).lineTo(210, doc.y).stroke();

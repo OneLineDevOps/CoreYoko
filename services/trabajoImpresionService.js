@@ -78,7 +78,7 @@ function formatReceiptTicket(receipt) {
   rows.push(
     line,
     `Op. gravada: S/ ${Number(receipt.subtotal || 0).toFixed(2)}`,
-    `IGV incluido: S/ ${Number(receipt.igv || 0).toFixed(2)}`,
+    `IGV incluido (${Number(receipt.igv_porcentaje || 18)}%): S/ ${Number(receipt.igv || 0).toFixed(2)}`,
     `TOTAL: S/ ${Number(receipt.total || 0).toFixed(2)}`,
     line,
     ...presentation.closingLines.map((message) => centerLine(message, width)),

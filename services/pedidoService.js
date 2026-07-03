@@ -1,9 +1,9 @@
 'use strict';
 const db = require('../models/db');
-const config = require('../config/db');
 const logger = require('../utils/logger');
 const ws = require('../utils/ws');
 const trabajoImpresionService = require('./trabajoImpresionService');
+const taxService = require('./taxService');
 
 function generateNumero() {
   return 'P' + Date.now();
@@ -180,8 +180,8 @@ async function createPedido({
     }
 
     const total = Number(subtotal.toFixed(2));
-    const base = Number((total / (1 + config.igv)).toFixed(2));
-    const igv = Number((total - base).toFixed(2));
+    const igvPorcentaje = await taxService.getPercentageBySucursal(sucursal_id, conn);
+    const { subtotal: base, igv } = taxService.calculateIncluded(total, igvPorcentaje);
     await conn.execute(`UPDATE pedidos SET subtotal = ?, igv = ?, total = ? WHERE id = ?`, [base.toFixed(2), igv.toFixed(2), total.toFixed(2), pedidoId]);
     await conn.execute(`INSERT INTO historial_estado_pedido (pedido_id, estado, usuario_id, observacion) VALUES (?, ?, ?, ?)`, [pedidoId, 'PENDIENTE', usuario_creacion || null, null]);
     await conn.commit();
@@ -234,10 +234,13 @@ async function getPedidoById(pedidoId) {
        cli.telefono,
        cli.correo,
        cli.direccion,
+       r.igv_porcentaje,
        u.usuario AS usuario_creacion_usuario,
        COALESCE(NULLIF(TRIM(CONCAT(COALESCE(u.nombre, ''), ' ', COALESCE(u.apellido, ''))), ''), u.usuario) AS usuario_creacion_nombre,
        he.fecha AS estado_fecha
      FROM pedidos p
+     JOIN sucursales s ON s.id = p.sucursal_id
+     JOIN restaurantes r ON r.id = s.restaurante_id
      LEFT JOIN mesas m ON m.id = p.mesa_id
      LEFT JOIN clientes cli ON cli.id = p.cliente_id
      LEFT JOIN usuarios u ON u.id = p.usuario_creacion
@@ -602,8 +605,8 @@ async function appendPedidoDetalles(pedidoId, detalles = []) {
       [pedidoId]
     );
     const total = Number(totalRows?.[0]?.total || 0);
-    const base = Number((total / (1 + config.igv)).toFixed(2));
-    const igv = Number((total - base).toFixed(2));
+    const igvPorcentaje = await taxService.getPercentageByPedido(pedidoId, conn);
+    const { subtotal: base, igv } = taxService.calculateIncluded(total, igvPorcentaje);
     await conn.execute(
       'UPDATE pedidos SET subtotal = ?, igv = ?, total = ? WHERE id = ?',
       [base.toFixed(2), igv.toFixed(2), total.toFixed(2), pedidoId]
@@ -726,8 +729,8 @@ async function updatePedidoDetalles(pedidoId, detalles = [], mesaTemporalCodigoI
     }
 
     const total = Number(subtotal.toFixed(2));
-    const base = Number((total / (1 + config.igv)).toFixed(2));
-    const igv = Number((total - base).toFixed(2));
+    const igvPorcentaje = await taxService.getPercentageByPedido(pedidoId, conn);
+    const { subtotal: base, igv } = taxService.calculateIncluded(total, igvPorcentaje);
     await conn.execute(`UPDATE pedidos SET subtotal = ?, igv = ?, total = ? WHERE id = ?`, [base.toFixed(2), igv.toFixed(2), total.toFixed(2), pedidoId]);
     await conn.commit();
 
