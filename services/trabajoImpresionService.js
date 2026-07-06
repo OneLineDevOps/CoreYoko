@@ -15,14 +15,84 @@ function center(text, width = 42) {
   return `${' '.repeat(Math.max(0, Math.floor((width - value.length) / 2)))}${value}`;
 }
 
+function orderDateParts(value) {
+  const date = value ? new Date(value) : new Date();
+  const validDate = Number.isNaN(date.getTime()) ? new Date() : date;
+  return {
+    date: new Intl.DateTimeFormat('es-PE', {
+      timeZone: 'America/Lima',
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+    }).format(validDate),
+    time: new Intl.DateTimeFormat('es-PE', {
+      timeZone: 'America/Lima',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).format(validDate),
+  };
+}
+
+function bigText(text) {
+  return `[[YOKO_BIG_ON]]${text}[[YOKO_NORMAL]]`;
+}
+
+function heroText(text) {
+  return `[[YOKO_HERO_ON]]${text}[[YOKO_NORMAL]]`;
+}
+
+function detailText(text) {
+  return `[[YOKO_DETAIL_ON]]${text}[[YOKO_NORMAL]]`;
+}
+
+function identificationTicket(printer, branch) {
+  const now = new Intl.DateTimeFormat('es-PE', {
+    timeZone: 'America/Lima',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).format(new Date());
+  return [
+    center('YOKO', 42),
+    center('IDENTIFICACION IMPRESORA', 42),
+    '-'.repeat(42),
+    `Nombre: ${printer.nombre || 'Impresora'}`,
+    bigText(`IP: ${printer.ip}`),
+    bigText(`Puerto: ${printer.puerto || 9100}`),
+    `Protocolo: ${printer.protocolo || 'RAW9100'}`,
+    `Estado: ${printer.estado || '-'}`,
+    printer.ultimo_error ? `Error: ${printer.ultimo_error}` : '',
+    '-'.repeat(42),
+    `Sucursal: ${branch?.nombre || branch?.codigo || printer.sucursal_id}`,
+    branch?.codigo ? `Codigo: ${branch.codigo}` : '',
+    `Agente: ${printer.agente_nombre || printer.agente_id || 'Sin agente'}`,
+    `Origen: ${printer.origen || '-'}`,
+    `Fecha: ${now}`,
+    '-'.repeat(42),
+    'Use esta hoja para identificar y etiquetar',
+    'la impresora fisica en cocina/caja.',
+    '',
+    '',
+    '',
+  ].filter((row) => row !== '').join('\n');
+}
+
 function formatOrderTicket(order, details, title, purpose) {
   const width = 42;
   const line = '-'.repeat(width);
+  const issuedAt = orderDateParts(order.fecha_pedido || order.fecha_creacion || order.created_at);
   const rows = [
     center('YOKO', width),
     center(title, width),
+    heroText(center(issuedAt.time, width)),
     line,
     `Pedido: ${order.numero || order.id}`,
+    `Fecha: ${issuedAt.date}`,
     `Mesa: ${order.mesa_nombre || order.mesa_temporal_codigo || order.mesa_id || 'Sin mesa'}`,
     `Tipo: ${order.tipo_pedido || 'MESA'}`,
     order.usuario_creacion_nombre ? `Mesero: ${order.usuario_creacion_nombre}` : '',
@@ -30,14 +100,14 @@ function formatOrderTicket(order, details, title, purpose) {
     line,
   ].filter(Boolean);
   for (const detail of details || []) {
-    rows.push(`${Number(detail.cantidad || 1)}x ${detail.producto_nombre || detail.descripcion || 'Producto'}`);
+    rows.push(detailText(`${Number(detail.cantidad || 1)}x ${detail.producto_nombre || detail.descripcion || 'Producto'}`));
     for (const modifier of detail.modificadores || []) {
-      rows.push(`  + ${Number(modifier.cantidad || 1)}x ${modifier.opcion_nombre || 'Modificador'}`);
+      rows.push(detailText(`  + ${Number(modifier.cantidad || 1)}x ${modifier.opcion_nombre || 'Modificador'}`));
     }
-    if (detail.observacion) rows.push(`  Obs: ${detail.observacion}`);
+    if (detail.observacion) rows.push(detailText(`  Obs: ${detail.observacion}`));
     rows.push('');
   }
-  rows.push(line, center('SIN IMPORTES', width), '', '', '');
+  rows.push(line, '', '', '');
   return rows.join('\n');
 }
 
@@ -269,6 +339,30 @@ async function enqueueReceipt(receipt, options = {}) {
   });
 }
 
+async function enqueuePrinterIdentification(printer, branch) {
+  if (!printer?.id || !printer?.sucursal_id) return null;
+  const idempotencyKey = `IDENTIFICACION_IP:${printer.id}:${Date.now()}`;
+  const [result] = await db.pool.execute(
+    `INSERT INTO trabajos_impresion
+     (sucursal_id, impresora_id, proposito, tipo, referencia_tipo, referencia_id,
+      clave_idempotencia, contenido, estado)
+     VALUES (?, ?, 'DIAGNOSTICO', 'IDENTIFICACION_IP', 'IMPRESORA', ?, ?, ?, 'PENDIENTE')`,
+    [
+      printer.sucursal_id,
+      printer.id,
+      printer.id,
+      idempotencyKey,
+      identificationTicket(printer, branch),
+    ]
+  );
+  const branchRow = branch || await impresoraService.branchById(printer.sucursal_id);
+  ws.broadcastToSucursal(branchRow?.codigo, {
+    type: 'trabajo_impresion',
+    data: { ids: [result.insertId], proposito: 'DIAGNOSTICO' },
+  });
+  return { id: result.insertId, estado: 'PENDIENTE' };
+}
+
 async function list({ sucursalId, status, limit = 100 }) {
   const params = [sucursalId];
   let filter = '';
@@ -281,7 +375,9 @@ async function list({ sucursalId, status, limit = 100 }) {
     `SELECT t.*, i.nombre AS impresora_nombre, i.ip, i.puerto
      FROM trabajos_impresion t
      JOIN impresoras i ON i.id = t.impresora_id
-     WHERE t.sucursal_id = ? ${filter}
+     WHERE t.sucursal_id = ?
+       AND t.fecha_creacion >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+       ${filter}
      ORDER BY t.id DESC
      LIMIT ?`,
     params
@@ -318,8 +414,9 @@ async function claim({ sucursalCodigo, agenteId, limit = 10 }) {
        WHERE t.sucursal_id = ?
          AND i.agente_id = ?
          AND i.activo = 1
-         AND t.estado IN ('PENDIENTE','ERROR')
+         AND t.estado = 'PENDIENTE'
          AND t.intentos < t.max_intentos
+         AND t.fecha_creacion >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
        ORDER BY t.id
        LIMIT ?
        FOR UPDATE`,
@@ -361,7 +458,9 @@ async function updateStatus({ id, agenteId, status, errorMessage }) {
          i.estado = ?,
          i.ultimo_error = ?,
          i.ultima_conexion = NOW()
-     WHERE t.id = ? AND i.agente_id = ?`,
+     WHERE t.id = ?
+       AND i.agente_id = ?
+       AND t.estado = 'ENVIADO'`,
     [
       status,
       errorMessage || null,
@@ -372,6 +471,17 @@ async function updateStatus({ id, agenteId, status, errorMessage }) {
     ]
   );
   if (!result.affectedRows) {
+    const [rows] = await db.query(
+      `SELECT t.estado
+       FROM trabajos_impresion t
+       JOIN impresoras i ON i.id = t.impresora_id
+       WHERE t.id = ? AND i.agente_id = ?
+       LIMIT 1`,
+      [id, agenteId]
+    );
+    if (rows?.[0]?.estado === 'CANCELADO') {
+      return { id: Number(id), estado: 'CANCELADO', ignored: true };
+    }
     const error = new Error('Trabajo no encontrado para este agente');
     error.code = 'NOT_FOUND';
     throw error;
@@ -382,11 +492,66 @@ async function updateStatus({ id, agenteId, status, errorMessage }) {
 async function retry(id) {
   const [result] = await db.pool.execute(
     `UPDATE trabajos_impresion
-     SET estado = 'PENDIENTE', error_mensaje = NULL, intentos = 0
-     WHERE id = ?`,
+     SET estado = 'PENDIENTE',
+         error_mensaje = NULL,
+         intentos = 0,
+         max_intentos = GREATEST(max_intentos, 1)
+     WHERE id = ?
+       AND estado IN ('ERROR','CANCELADO')`,
     [id]
   );
   return result.affectedRows ? { id: Number(id), estado: 'PENDIENTE' } : null;
+}
+
+async function cancel(id, reason = 'Cancelado manualmente') {
+  const [result] = await db.pool.execute(
+    `UPDATE trabajos_impresion
+     SET estado = 'CANCELADO',
+         error_mensaje = ?,
+         max_intentos = intentos
+     WHERE id = ?
+       AND estado IN ('PENDIENTE','ENVIADO','ERROR')`,
+    [reason, id]
+  );
+  return result.affectedRows ? { id: Number(id), estado: 'CANCELADO' } : null;
+}
+
+async function reprint(id) {
+  const [rows] = await db.query(
+    `SELECT *
+     FROM trabajos_impresion
+     WHERE id = ?
+       AND estado IN ('IMPRESO','ERROR','CANCELADO')
+       AND fecha_creacion >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+     LIMIT 1`,
+    [id]
+  );
+  const source = rows?.[0];
+  if (!source) return null;
+  const [result] = await db.pool.execute(
+    `INSERT INTO trabajos_impresion
+     (sucursal_id, impresora_id, proposito, tipo, referencia_tipo, referencia_id,
+      clave_idempotencia, contenido, estado, max_intentos)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDIENTE', 1)`,
+    [
+      source.sucursal_id,
+      source.impresora_id,
+      source.proposito,
+      String(source.tipo || 'TICKET').includes('REIMPRESION')
+        ? source.tipo
+        : `${String(source.tipo || 'TICKET').slice(0, 37)}_REIMPRESION`,
+      source.referencia_tipo,
+      source.referencia_id,
+      `REIMPRESION:${source.id}:${Date.now()}`,
+      source.contenido,
+    ]
+  );
+  const branch = await impresoraService.branchById(source.sucursal_id);
+  ws.broadcastToSucursal(branch?.codigo, {
+    type: 'trabajo_impresion',
+    data: { ids: [result.insertId], proposito: source.proposito },
+  });
+  return { id: result.insertId, estado: 'PENDIENTE' };
 }
 
 module.exports = {
@@ -397,8 +562,11 @@ module.exports = {
   enqueueOrder,
   enqueueReceipt,
   enqueuePrecuenta,
+  enqueuePrinterIdentification,
   list,
   claim,
   updateStatus,
   retry,
+  cancel,
+  reprint,
 };

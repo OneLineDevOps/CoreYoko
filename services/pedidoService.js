@@ -21,6 +21,24 @@ function normalizeMesaTemporalCodigo(value) {
   return codigo;
 }
 
+function detailSignature(detail = {}) {
+  const modifiers = (detail.modificadores || [])
+    .map((modifier) => ({
+      id: Number(modifier.opcion_modificador_id || modifier.id || 0),
+      cantidad: Number(modifier.cantidad || 1),
+      precio: Number(modifier.precio || 0),
+    }))
+    .sort((a, b) => a.id - b.id || a.precio - b.precio || a.cantidad - b.cantidad);
+  return JSON.stringify({
+    producto_id: Number(detail.producto_id || 0),
+    producto_precio_id: Number(detail.producto_precio_id || 0),
+    cantidad: Number(detail.cantidad || 1),
+    precio_unitario: Number(detail.precio_unitario || 0),
+    observacion: String(detail.observacion || '').trim(),
+    modificadores: modifiers,
+  });
+}
+
 async function reserveMesaTemporalCodigo(conn, sucursalId, requestedCode = null, pedidoId = null) {
   const lockName = `mesa-temporal-${sucursalId}`;
   const [lockRows] = await conn.query('SELECT GET_LOCK(?, 5) AS acquired', [lockName]);
@@ -657,6 +675,13 @@ async function updatePedidoDetalles(pedidoId, detalles = [], mesaTemporalCodigoI
   let temporalLockName = null;
   try {
     await conn.beginTransaction();
+    const pedidoAntes = await getPedidoById(pedidoId);
+    const oldSignatureCounts = new Map();
+    for (const detail of pedidoAntes?.detalles || []) {
+      const signature = detailSignature(detail);
+      oldSignatureCounts.set(signature, (oldSignatureCounts.get(signature) || 0) + 1);
+    }
+    const addedDetailIds = [];
     if (mesaTemporalCodigoInput !== undefined) {
       const [pedidoRows] = await conn.execute(
         `SELECT id, sucursal_id, mesa_temporal_codigo
@@ -725,6 +750,14 @@ async function updatePedidoDetalles(pedidoId, detalles = [], mesaTemporalCodigoI
         await conn.execute(`UPDATE pedido_detalles SET subtotal = ? WHERE id = ?`, [itemSubtotal.toFixed(2), detalleId]);
       }
 
+      const signature = detailSignature(item);
+      const existingCount = oldSignatureCounts.get(signature) || 0;
+      if (existingCount > 0) {
+        oldSignatureCounts.set(signature, existingCount - 1);
+      } else {
+        addedDetailIds.push(Number(detalleId));
+      }
+
       subtotal += itemSubtotal;
     }
 
@@ -742,7 +775,17 @@ async function updatePedidoDetalles(pedidoId, detalles = [], mesaTemporalCodigoI
         type: 'pedido_actualizado',
         data: { ...(pedido || {}), id: pedidoId, sucursal_codigo: sucursalCodigo }
       });
-      await trabajoImpresionService.enqueueOrder(pedido, 'ACTUALIZADO');
+      const addedOnly = {
+        ...pedido,
+        detalles: (pedido?.detalles || []).filter((detail) =>
+          addedDetailIds.includes(Number(detail.id))
+        )
+      };
+      if (addedOnly.detalles.length) {
+        await trabajoImpresionService.enqueueOrder(addedOnly, 'AGREGADO');
+      } else {
+        await trabajoImpresionService.enqueueOrder(pedido, 'ACTUALIZADO');
+      }
     } catch (emitErr) {
       logger.error('pedido_actualizado websocket error', emitErr);
     }

@@ -88,6 +88,24 @@ router.put('/:id/propositos', async (req, res) => {
   }
 });
 
+router.post('/:id/imprimir-ip', async (req, res) => {
+  try {
+    const printer = await canManagePrinter(req, req.params.id);
+    if (!printer) {
+      return res.status(403).json({ error: 'Impresora fuera de su restaurante' });
+    }
+    if (!printer.activo) {
+      return res.status(400).json({ error: 'La impresora está desactivada' });
+    }
+    const branch = await impresoraService.branchById(printer.sucursal_id);
+    const created = await trabajoService.enqueuePrinterIdentification(printer, branch);
+    res.status(201).json(created);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 router.delete('/:id', async (req, res) => {
   try {
     if (!(await canManagePrinter(req, req.params.id))) {
@@ -129,7 +147,44 @@ router.post('/trabajos/:id/reintentar', async (req, res) => {
       return res.status(403).json({ error: 'Trabajo fuera de su restaurante' });
     }
     const updated = await trabajoService.retry(req.params.id);
+    if (!updated) return res.status(400).json({ error: 'Solo se pueden reintentar trabajos en ERROR o CANCELADO' });
     res.json(updated);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.post('/trabajos/:id/cancelar', async (req, res) => {
+  try {
+    const [rows] = await require('../models/db').query(
+      'SELECT sucursal_id FROM trabajos_impresion WHERE id = ? LIMIT 1',
+      [req.params.id]
+    );
+    if (!rows?.length || !(await canManageBranch(req, rows[0].sucursal_id))) {
+      return res.status(403).json({ error: 'Trabajo fuera de su restaurante' });
+    }
+    const updated = await trabajoService.cancel(req.params.id, req.body?.motivo || 'Cancelado manualmente');
+    if (!updated) return res.status(400).json({ error: 'Este trabajo ya no se puede cancelar' });
+    res.json(updated);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.post('/trabajos/:id/reimprimir', async (req, res) => {
+  try {
+    const [rows] = await require('../models/db').query(
+      'SELECT sucursal_id FROM trabajos_impresion WHERE id = ? LIMIT 1',
+      [req.params.id]
+    );
+    if (!rows?.length || !(await canManageBranch(req, rows[0].sucursal_id))) {
+      return res.status(403).json({ error: 'Trabajo fuera de su restaurante' });
+    }
+    const created = await trabajoService.reprint(req.params.id);
+    if (!created) return res.status(400).json({ error: 'Solo se puede reimprimir tickets de las últimas 24 horas' });
+    res.status(201).json(created);
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Internal server error' });
