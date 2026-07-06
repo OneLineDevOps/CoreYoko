@@ -143,7 +143,7 @@ async function getRankingPlatos({ sucursal_id, fecha_desde, fecha_hasta }) {
   };
 }
 
-async function getComprobantesSunat({ sucursal_id, fecha_desde, fecha_hasta }) {
+async function getComprobantesSunat({ sucursal_id, fecha_desde, fecha_hasta, exportar }) {
   const { from, to } = normalizeRange({ fecha_desde, fecha_hasta });
   const baseFrom = `
     FROM comprobantes comp
@@ -156,10 +156,11 @@ async function getComprobantesSunat({ sucursal_id, fecha_desde, fecha_hasta }) {
       AND DATE(comp.fecha_emision) BETWEEN ? AND ?
   `;
   const params = [sucursal_id, from, to];
+  const limitClause = String(exportar || '') === '1' ? '' : 'LIMIT 1000';
   const [rows] = await db.query(
     `SELECT
        comp.id, comp.tipo, comp.serie, comp.numero, comp.fecha_emision,
-       comp.subtotal, comp.igv, comp.total, comp.estado,
+       comp.subtotal, comp.descuento, comp.igv, comp.total, comp.estado,
        comp.sunat_estado, comp.sunat_codigo, comp.sunat_mensaje,
        comp.sunat_enviado_at, comp.sunat_aceptado_at,
        comp.origen, comp.motivo_descripcion,
@@ -168,10 +169,11 @@ async function getComprobantesSunat({ sucursal_id, fecha_desde, fecha_hasta }) {
          cli.razon_social,
          NULLIF(TRIM(CONCAT(COALESCE(cli.nombres, ''), ' ', COALESCE(cli.apellidos, ''))), '')
        ) AS cliente,
-       ref.tipo AS referencia_tipo, ref.serie AS referencia_serie, ref.numero AS referencia_numero
+       ref.tipo AS referencia_tipo, ref.serie AS referencia_serie, ref.numero AS referencia_numero,
+       ref.fecha_emision AS referencia_fecha_emision
      ${baseFrom}
      ORDER BY comp.fecha_emision DESC, comp.id DESC
-     LIMIT 1000`,
+     ${limitClause}`,
     params
   );
   const [countRows] = await db.query(`SELECT COUNT(*) AS total ${baseFrom}`, params);
@@ -180,6 +182,7 @@ async function getComprobantesSunat({ sucursal_id, fecha_desde, fecha_hasta }) {
     id: Number(row.id),
     numero: Number(row.numero),
     subtotal: money(row.subtotal),
+    descuento: money(row.descuento),
     igv: money(row.igv),
     total: money(row.total),
     documento: `${row.serie}-${String(row.numero).padStart(8, '0')}`,
