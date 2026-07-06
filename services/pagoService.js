@@ -4,6 +4,30 @@ const cajaService = require('./cajaService');
 const comprobanteService = require('./comprobanteService');
 const trabajoImpresionService = require('./trabajoImpresionService');
 
+function validateClientForReceipt(client, receiptType) {
+  if (
+    !client
+    || !String(client.numero_documento || '').trim()
+    || !(String(client.razon_social || '').trim() || String(client.nombres || '').trim())
+  ) {
+    const err = new Error('Busque o guarde un cliente válido antes de cobrar');
+    err.code = 'INVALID_INPUT';
+    throw err;
+  }
+  if (
+    receiptType === 'FACTURA'
+    && (
+      String(client.tipo_documento || '').toUpperCase() !== 'RUC'
+      || !/^\d{11}$/.test(String(client.numero_documento || ''))
+      || !String(client.razon_social || '').trim()
+    )
+  ) {
+    const err = new Error('La factura requiere un cliente guardado con RUC de 11 dígitos y razón social');
+    err.code = 'INVALID_INPUT';
+    throw err;
+  }
+}
+
 async function listByPedido(pedidoId) {
   const [rows] = await db.query(
     `SELECT p.*, mp.nombre AS metodo_pago
@@ -83,12 +107,19 @@ async function processPayment({
       throw err;
     }
 
-    const [clientRows] = await conn.execute('SELECT id FROM clientes WHERE id = ? LIMIT 1', [cliente_id]);
+    const [clientRows] = await conn.execute(
+      `SELECT id, tipo_documento, numero_documento, razon_social, nombres
+       FROM clientes
+       WHERE id = ?
+       LIMIT 1`,
+      [cliente_id]
+    );
     if (!clientRows?.length) {
       const err = new Error('El cliente seleccionado no existe');
       err.code = 'INVALID_INPUT';
       throw err;
     }
+    validateClientForReceipt(clientRows[0], tipo);
     const [methodRows] = await conn.execute(
       'SELECT id FROM metodos_pago WHERE id = ? AND activo = 1 LIMIT 1',
       [metodo_pago_id]
