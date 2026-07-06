@@ -9,6 +9,7 @@
     "sunat:once": "node scripts/run-sunat-once.js",
     "migrate:sunat": "node scripts/run-migration.js migrations/20260702_create_sunat_delivery.sql",
     "migrate:igv": "node scripts/run-migration.js migrations/20260705_restaurant_igv.sql",
+    "migrate:recetas": "node scripts/run-migration.js migrations/20260706_recetas_reportes.sql",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],

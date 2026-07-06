@@ -23,6 +23,8 @@ const usuarios = require('./usuarios');
 const cocina = require('./cocina');
 const impresoras = require('./impresoras');
 const printAgent = require('./print_agent');
+const recetas = require('./recetas');
+const reportes = require('./reportes');
 
 router.use('/restaurants', restaurants);
 router.use('/pedidos', pedidos);
@@ -46,5 +48,7 @@ router.use('/usuarios', usuarios);
 router.use('/cocina', cocina);
 router.use('/impresoras', impresoras);
 router.use('/print-agent', printAgent);
+router.use('/recetas', recetas);
+router.use('/reportes', reportes);
 
 module.exports = router;
