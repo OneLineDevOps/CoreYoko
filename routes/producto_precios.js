@@ -15,9 +15,14 @@ const accessFor = (req) => ({
 router.get('/', async (req, res) => {
   try {
     const productoId = req.query.producto_id || req.query.productoId;
-    if (!productoId) return res.status(400).json({ error: 'producto_id is required' });
-    const rows = await productoService.getPrices(productoId, accessFor(req));
-    res.json(rows);
+    const sucursalId = req.query.sucursal_id || req.query.sucursalId;
+    if (productoId) {
+      return res.json(await productoService.getPrices(productoId, accessFor(req)));
+    }
+    if (sucursalId) {
+      return res.json(await productoService.getPricesByBranch(sucursalId, accessFor(req)));
+    }
+    return res.status(400).json({ error: 'producto_id or sucursal_id is required' });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Internal server error' });

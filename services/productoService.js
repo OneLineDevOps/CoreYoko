@@ -244,6 +244,23 @@ async function getPrices(productoId, access = {}) {
   return rows || [];
 }
 
+async function getPricesByBranch(sucursalId, access = {}) {
+  if (!sucursalId) return [];
+  const filter = restaurantFilter(access);
+  const [rows] = await db.query(
+    `SELECT pp.id, pp.producto_id, pp.nombre_precio, pp.precio, pp.activo
+     FROM producto_precios pp
+     JOIN productos p ON p.id = pp.producto_id AND p.activo = 1
+     JOIN categorias c ON c.id = p.categoria_id AND c.activo = 1
+     JOIN cartas ca ON ca.id = c.carta_id AND ca.activa = 1
+     JOIN sucursales s ON s.id = ca.sucursal_id AND s.activo = 1
+     WHERE ca.sucursal_id = ? AND pp.activo = 1${filter.sql}
+     ORDER BY pp.producto_id, pp.id`,
+    [sucursalId, ...filter.params]
+  );
+  return rows || [];
+}
+
 async function createPrice({ producto_id, nombre_precio, precio }, access = {}) {
   if (!producto_id || !(await getById(producto_id, access))) {
     const err = new Error('El producto no pertenece al restaurante del usuario');
@@ -291,6 +308,7 @@ module.exports = {
   update,
   remove,
   getPrices,
+  getPricesByBranch,
   createPrice,
   updatePrice,
   removePrice,
