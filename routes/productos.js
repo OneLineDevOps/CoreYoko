@@ -15,9 +15,14 @@ const accessFor = (req) => ({
 router.get('/', async (req, res) => {
   try {
     const categoriaId = req.query.categoria_id || req.query.categoriaId;
-    if (!categoriaId) return res.status(400).json({ error: 'categoria_id is required' });
-    const rows = await productoService.getByCategory(categoriaId, accessFor(req));
-    res.json(rows);
+    const sucursalId = req.query.sucursal_id || req.query.sucursalId;
+    if (categoriaId) {
+      return res.json(await productoService.getByCategory(categoriaId, accessFor(req)));
+    }
+    if (sucursalId) {
+      return res.json(await productoService.getByBranch(sucursalId, accessFor(req)));
+    }
+    return res.status(400).json({ error: 'categoria_id or sucursal_id is required' });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Internal server error' });

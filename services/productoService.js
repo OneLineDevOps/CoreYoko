@@ -75,6 +75,23 @@ async function getByCategory(categoriaId, access = {}) {
   return hydrateStations(rows || []);
 }
 
+async function getByBranch(sucursalId, access = {}) {
+  if (!sucursalId) return [];
+  const filter = restaurantFilter(access);
+  const [rows] = await db.query(
+    `SELECT p.id, p.categoria_id, p.codigo, p.nombre, p.descripcion, p.imagen,
+            p.controla_stock, p.activo
+     FROM productos p
+     JOIN categorias c ON c.id = p.categoria_id AND c.activo = 1
+     JOIN cartas ca ON ca.id = c.carta_id AND ca.activa = 1
+     JOIN sucursales s ON s.id = ca.sucursal_id AND s.activo = 1
+     WHERE ca.sucursal_id = ? AND p.activo = 1${filter.sql}
+     ORDER BY c.nombre, p.nombre, p.id`,
+    [sucursalId, ...filter.params]
+  );
+  return hydrateStations(rows || []);
+}
+
 async function getById(id, access = {}) {
   const filter = restaurantFilter(access);
   const [rows] = await db.query(
@@ -268,6 +285,7 @@ async function removePrice(id, access = {}) {
 
 module.exports = {
   getByCategory,
+  getByBranch,
   getById,
   create,
   update,
