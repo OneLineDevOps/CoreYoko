@@ -202,8 +202,14 @@ async function setPurposes(printerId, purposes = []) {
     ...PROPOSITOS_BASE,
     ...(stationRows || []).map((row) => row.proposito).filter(Boolean),
   ]);
-  const valid = cleanPurposes(purposes)
-    .filter((item) => allowedPurposes.has(item));
+  const requested = cleanPurposes(purposes);
+  const invalid = requested.filter((item) => !allowedPurposes.has(item));
+  if (invalid.length) {
+    const error = new Error(`Propósito no configurado como estación activa: ${invalid.join(', ')}`);
+    error.code = 'INVALID_INPUT';
+    throw error;
+  }
+  const valid = requested.filter((item) => allowedPurposes.has(item));
   const conn = await db.getConnection();
   try {
     await conn.beginTransaction();

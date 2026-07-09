@@ -46,6 +46,32 @@ function detailText(text) {
   return `[[YOKO_DETAIL_ON]]${text}[[YOKO_NORMAL]]`;
 }
 
+function normalizePurpose(value) {
+  return String(value || '').trim().toUpperCase();
+}
+
+function groupOrderDetailsByStation(details = [], stationRows = []) {
+  const stationByProduct = new Map();
+  for (const row of stationRows || []) {
+    const productId = Number(row.producto_id);
+    const station = normalizePurpose(row.estacion);
+    if (!productId || !station) continue;
+    if (!stationByProduct.has(productId)) stationByProduct.set(productId, []);
+    stationByProduct.get(productId).push(station);
+  }
+
+  const groups = new Map();
+  for (const detail of details || []) {
+    const stations = stationByProduct.get(Number(detail.producto_id)) || [];
+    const destinations = stations.length ? stations : ['COCINA'];
+    for (const station of destinations) {
+      if (!groups.has(station)) groups.set(station, []);
+      groups.get(station).push(detail);
+    }
+  }
+  return groups;
+}
+
 function identificationTicket(printer, branch) {
   const now = new Intl.DateTimeFormat('es-PE', {
     timeZone: 'America/Lima',
@@ -207,6 +233,7 @@ async function enqueueForPurpose({
   idempotencyKey,
   content,
 }) {
+  const normalizedPurpose = normalizePurpose(purpose);
   await impresoraService.markStaleDetected(sucursalId);
   const [printers] = await db.query(
     `SELECT i.id
@@ -216,8 +243,8 @@ async function enqueueForPurpose({
        AND i.activo = 1
        AND i.estado = 'ACTIVA'
        AND ip.activo = 1
-       AND ip.proposito = ?`,
-    [sucursalId, purpose]
+       AND UPPER(TRIM(ip.proposito)) = ?`,
+    [sucursalId, normalizedPurpose]
   );
   const created = [];
   for (const printer of printers || []) {
@@ -230,7 +257,7 @@ async function enqueueForPurpose({
         [
           sucursalId,
           printer.id,
-          purpose,
+          normalizedPurpose,
           type,
           referenceType || null,
           referenceId || null,
@@ -247,7 +274,7 @@ async function enqueueForPurpose({
     const branch = await impresoraService.branchById(sucursalId);
     ws.broadcastToSucursal(branch?.codigo, {
       type: 'trabajo_impresion',
-      data: { ids: created, proposito: purpose },
+      data: { ids: created, proposito: normalizedPurpose },
     });
   }
   return created;
@@ -264,21 +291,7 @@ async function enqueueOrder(order, eventName = 'NUEVO') {
       ? (order.detalles || []).map((detail) => detail.producto_id).filter(Boolean)
       : [0]]
   );
-  const stationByProduct = new Map();
-  for (const row of stationRows || []) {
-    if (!stationByProduct.has(Number(row.producto_id))) stationByProduct.set(Number(row.producto_id), []);
-    stationByProduct.get(Number(row.producto_id)).push(row.estacion);
-  }
-
-  const groups = new Map();
-  for (const detail of order.detalles || []) {
-    const stations = stationByProduct.get(Number(detail.producto_id)) || [];
-    const destinations = stations.length ? stations : ['COCINA'];
-    for (const station of destinations) {
-      if (!groups.has(station)) groups.set(station, []);
-      groups.get(station).push(detail);
-    }
-  }
+  const groups = groupOrderDetailsByStation(order.detalles || [], stationRows || []);
 
   const stamp = eventName === 'NUEVO' ? 'NUEVO' : `ACT-${Date.now()}`;
   const jobs = [];
@@ -555,6 +568,7 @@ async function reprint(id) {
 }
 
 module.exports = {
+  groupOrderDetailsByStation,
   formatOrderTicket,
   formatReceiptTicket,
   formatPrecuentaTicket,

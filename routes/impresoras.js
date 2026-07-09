@@ -83,6 +83,7 @@ router.put('/:id/propositos', async (req, res) => {
     const updated = await impresoraService.setPurposes(req.params.id, req.body.propositos || []);
     res.json(updated);
   } catch (error) {
+    if (error.code === 'INVALID_INPUT') return res.status(400).json({ error: error.message });
     console.error(error);
     res.status(500).json({ error: 'Internal server error' });
   }
