@@ -5,6 +5,14 @@ const db = require('../models/db');
 const PROPOSITOS_BASE = ['CAJA', 'DELIVERY'];
 const ESTADOS = ['ACTIVA', 'INACTIVA', 'ERROR'];
 
+function cleanPurposes(values = []) {
+  return [...new Set(
+    (values || [])
+      .map((item) => String(item || '').trim().toUpperCase())
+      .filter(Boolean)
+  )];
+}
+
 function protocolForPort(port) {
   const value = Number(port || 9100);
   if (value === 515) return 'LPD';
@@ -98,7 +106,7 @@ async function listBySucursal(sucursalId, includeInactive = false) {
   );
   return (rows || []).map((row) => ({
     ...row,
-    propositos: row.propositos_csv ? String(row.propositos_csv).split(',') : [],
+    propositos: row.propositos_csv ? cleanPurposes(String(row.propositos_csv).split(',')) : [],
   }));
 }
 
@@ -109,7 +117,7 @@ async function getById(id) {
     'SELECT proposito FROM impresora_propositos WHERE impresora_id = ? AND activo = 1 ORDER BY proposito',
     [id]
   );
-  return { ...rows[0], propositos: purposes.map((row) => row.proposito) };
+  return { ...rows[0], propositos: cleanPurposes(purposes.map((row) => row.proposito)) };
 }
 
 async function create(data) {
@@ -194,7 +202,7 @@ async function setPurposes(printerId, purposes = []) {
     ...PROPOSITOS_BASE,
     ...(stationRows || []).map((row) => row.proposito).filter(Boolean),
   ]);
-  const valid = [...new Set((purposes || []).map((item) => String(item).toUpperCase()))]
+  const valid = cleanPurposes(purposes)
     .filter((item) => allowedPurposes.has(item));
   const conn = await db.getConnection();
   try {
