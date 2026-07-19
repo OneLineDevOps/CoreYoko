@@ -329,6 +329,24 @@ async function listPedidosBySucursal(sucursal_id, estado) {
         ORDER BY pg.fecha_pago DESC, pg.id DESC
         LIMIT 1
       ) AS sesion_caja_id,
+      (
+        SELECT comp.id
+        FROM comprobantes comp
+        JOIN cuentas cu ON cu.id = comp.cuenta_id
+        LEFT JOIN comprobantes nc ON nc.id = (
+          SELECT nc2.id FROM comprobantes nc2
+          WHERE nc2.comprobante_referencia_id = comp.id
+            AND nc2.tipo = 'NOTA_CREDITO'
+            AND nc2.sunat_estado <> 'RECHAZADO'
+          ORDER BY nc2.id DESC LIMIT 1
+        )
+        WHERE cu.pedido_id = p.id
+          AND comp.tipo IN ('BOLETA', 'FACTURA', 'NOTA_PEDIDO')
+          AND comp.estado <> 'ANULADO'
+          AND nc.id IS NULL
+        ORDER BY comp.id DESC
+        LIMIT 1
+      ) AS comprobante_activo_id,
       he.fecha AS estado_fecha
     FROM pedidos p
     LEFT JOIN mesas m ON m.id = p.mesa_id
