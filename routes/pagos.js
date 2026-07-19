@@ -43,4 +43,37 @@ router.post('/procesar', optionalAuth, async (req, res) => {
   }
 });
 
+router.post('/cobrar-cuenta', optionalAuth, async (req, res) => {
+  try {
+    const result = await pagoService.payAccount({
+      ...req.body,
+      usuario_id: req.user?.id || req.body.usuario_id || null
+    });
+    res.json(result);
+  } catch (err) {
+    if (err.code === 'NOT_FOUND') return res.status(404).json({ error: err.message });
+    if (err.code === 'INVALID_INPUT') return res.status(400).json({ error: err.message });
+    if (err.code === 'INVALID_STATE') return res.status(409).json({ error: err.message });
+    if (err.code === 'CAJA_NO_ABIERTA') return res.status(409).json({ error: err.message });
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.post('/anular-cuenta', optionalAuth, async (req, res) => {
+  try {
+    const result = await pagoService.cancelAccountPayment({
+      ...req.body,
+      usuario_id: req.user?.id || req.body.usuario_id || null
+    });
+    res.json(result);
+  } catch (err) {
+    if (err.code === 'NOT_FOUND') return res.status(404).json({ error: err.message });
+    if (err.code === 'INVALID_INPUT') return res.status(400).json({ error: err.message });
+    if (err.code === 'INVALID_STATE') return res.status(409).json({ error: err.message });
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 module.exports = router;

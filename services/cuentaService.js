@@ -42,7 +42,7 @@ async function listByPedido(pedidoId) {
      ORDER BY id`,
     [pedidoId]
   );
-  return rows;
+  return Promise.all((rows || []).map((row) => getById(row.id)));
 }
 
 async function getById(id) {
@@ -89,6 +89,23 @@ async function getById(id) {
     [id]
   );
   cuenta.comprobantes = comprobantes || [];
+  const [pagos] = await db.query(
+    `SELECT pg.id, pg.metodo_pago_id, pg.monto, pg.estado, pg.referencia, pg.fecha_pago,
+            pg.comprobante_id, mp.nombre AS metodo_pago
+     FROM pagos pg
+     LEFT JOIN metodos_pago mp ON mp.id = pg.metodo_pago_id
+     WHERE pg.pedido_id = ?
+       AND pg.estado = 'ACTIVO'
+       AND (
+         pg.referencia = ?
+         OR pg.comprobante_id IN (
+           SELECT comp.id FROM comprobantes comp WHERE comp.cuenta_id = ?
+         )
+       )
+     ORDER BY pg.fecha_pago DESC, pg.id DESC`,
+    [cuenta.pedido_id, `Pago cuenta #${id}`, id]
+  );
+  cuenta.pagos = pagos || [];
   return cuenta;
 }
 

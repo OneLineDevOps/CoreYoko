@@ -16,6 +16,7 @@ function normalizePayload(data = {}) {
     igv_porcentaje: Number(igvPercentage.toFixed(2)),
     activo: data.activo === undefined ? 1 : Number(Boolean(data.activo)),
     sunat_activo: data.sunat_activo === undefined ? 0 : Number(Boolean(data.sunat_activo)),
+    app_comprobantes_activo: data.app_comprobantes_activo === undefined ? 0 : Number(Boolean(data.app_comprobantes_activo)),
   };
 }
 
@@ -33,7 +34,7 @@ function validateSunatInput(data = {}) {
 function safeSelect(includeCredentials = false) {
   return `r.id, r.nombre, r.ruc, r.direccion, r.telefono, r.igv_porcentaje, r.activo,
     ${includeCredentials ? 'r.sunat_usuario_sol, r.sunat_passphrase, r.sunat_token,' : ''}
-    r.sunat_activo,
+    r.sunat_activo, r.app_comprobantes_activo,
     CASE
       WHEN r.sunat_usuario_sol IS NOT NULL
        AND r.sunat_passphrase IS NOT NULL
@@ -99,8 +100,8 @@ async function create(data) {
 
   const [res] = await db.pool.execute(
     `INSERT INTO restaurantes
-     (nombre, ruc, direccion, telefono, igv_porcentaje, activo, sunat_usuario_sol, sunat_passphrase, sunat_token, sunat_activo)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     (nombre, ruc, direccion, telefono, igv_porcentaje, activo, sunat_usuario_sol, sunat_passphrase, sunat_token, sunat_activo, app_comprobantes_activo)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       payload.nombre,
       payload.ruc,
@@ -112,6 +113,7 @@ async function create(data) {
       data.sunat_passphrase ? String(data.sunat_passphrase) : null,
       data.sunat_token ? String(data.sunat_token).trim() : null,
       payload.sunat_activo,
+      payload.app_comprobantes_activo,
     ]
   );
   return getById(res.insertId);
@@ -132,7 +134,7 @@ async function update(id, data) {
   await db.pool.execute(
     `UPDATE restaurantes
      SET nombre = ?, ruc = ?, direccion = ?, telefono = ?, igv_porcentaje = ?, activo = ?,
-         sunat_usuario_sol = ?, sunat_passphrase = ?, sunat_token = ?, sunat_activo = ?
+         sunat_usuario_sol = ?, sunat_passphrase = ?, sunat_token = ?, sunat_activo = ?, app_comprobantes_activo = ?
      WHERE id = ?`,
     [
       payload.nombre,
@@ -145,6 +147,7 @@ async function update(id, data) {
       data.sunat_passphrase !== undefined ? (String(data.sunat_passphrase) || null) : current.sunat_passphrase,
       data.sunat_token !== undefined ? (String(data.sunat_token).trim() || null) : current.sunat_token,
       data.sunat_activo === undefined ? Number(current.sunat_activo || 0) : payload.sunat_activo,
+      data.app_comprobantes_activo === undefined ? Number(current.app_comprobantes_activo || 0) : payload.app_comprobantes_activo,
       id
     ]
   );

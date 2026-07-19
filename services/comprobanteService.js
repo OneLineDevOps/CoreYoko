@@ -144,6 +144,11 @@ async function createWithConnection(
   { cuenta_id, cliente_id, tipo = 'BOLETA', metodo_pago_id = null, sesion_caja_id = null },
   conn
 ) {
+    if (!['NOTA_PEDIDO', 'BOLETA', 'FACTURA'].includes(tipo)) {
+      const err = new Error('El tipo de comprobante no es válido');
+      err.code = 'INVALID_INPUT';
+      throw err;
+    }
     const cuenta = await getCuentaContext(cuenta_id, conn);
     if (!cuenta) {
       const err = new Error('Cuenta no encontrada');
@@ -174,6 +179,10 @@ async function createWithConnection(
     const { subtotal, igv } = taxService.calculateIncluded(total, igvPorcentaje);
     const numeracion = await nextSerie(tipo, cuenta.restaurante_id || 1, conn);
     const clienteId = cliente_id || cuenta.pedido_cliente_id || null;
+    if (tipo !== 'NOTA_PEDIDO') {
+      const [[client]] = await conn.execute('SELECT * FROM clientes WHERE id = ? LIMIT 1', [clienteId]);
+      validateFiscalClient(tipo, client);
+    }
 
     const [res] = await conn.execute(
       `INSERT INTO comprobantes
@@ -218,7 +227,42 @@ async function createWithConnection(
     }
 
     await sunatService.enqueueComprobante(comprobanteId, conn);
-    await conn.execute('UPDATE cuentas SET estado = "FACTURADA", total = ? WHERE id = ?', [total.toFixed(2), cuenta_id]);
+    await conn.execute(
+      `UPDATE cuentas
+       SET estado = CASE WHEN estado = "PAGADA" THEN "PAGADA" ELSE "FACTURADA" END,
+           total = ?
+       WHERE id = ?`,
+      [total.toFixed(2), cuenta_id]
+    );
+    await conn.execute(
+      `UPDATE pagos
+       SET comprobante_id = ?
+       WHERE id = (
+         SELECT id FROM (
+           SELECT id
+           FROM pagos
+           WHERE pedido_id = ?
+             AND estado = 'ACTIVO'
+             AND comprobante_id IS NULL
+             AND ABS(monto - ?) < 0.01
+             AND (? IS NULL OR metodo_pago_id = ?)
+             AND (? IS NULL OR sesion_caja_id = ?)
+             AND (referencia = ? OR referencia IS NULL)
+           ORDER BY id DESC
+           LIMIT 1
+         ) AS pago_pendiente
+       )`,
+      [
+        comprobanteId,
+        cuenta.pedido_id,
+        total.toFixed(2),
+        metodo_pago_id || null,
+        metodo_pago_id || null,
+        activeSession.id || null,
+        activeSession.id || null,
+        `Pago cuenta #${cuenta_id}`
+      ]
+    );
     return { id: comprobanteId };
 }
 
@@ -233,6 +277,174 @@ async function create(payload) {
       await trabajoImpresionService.enqueueReceipt(receipt);
     } catch (printError) {
       console.error('No se pudo encolar el comprobante', printError);
+    }
+    return receipt;
+  } catch (err) {
+    await conn.rollback();
+    throw err;
+  } finally {
+    conn.release();
+  }
+}
+
+async function createFromPaidAccountForApp({
+  cuenta_id,
+  cliente_id,
+  tipo = 'BOLETA',
+  usuario_id = null,
+  restaurante_id = null,
+}) {
+  if (!['BOLETA', 'FACTURA'].includes(tipo) || !cuenta_id || !cliente_id) {
+    const err = new Error('Complete cuenta, cliente y tipo de comprobante');
+    err.code = 'INVALID_INPUT';
+    throw err;
+  }
+
+  const conn = await db.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [accountRows] = await conn.execute(
+      `SELECT c.*, p.sucursal_id, p.id AS pedido_id, s.restaurante_id,
+              r.app_comprobantes_activo
+       FROM cuentas c
+       JOIN pedidos p ON p.id = c.pedido_id
+       JOIN sucursales s ON s.id = p.sucursal_id
+       JOIN restaurantes r ON r.id = s.restaurante_id
+       WHERE c.id = ?
+       LIMIT 1
+       FOR UPDATE`,
+      [cuenta_id]
+    );
+    const cuenta = accountRows?.[0];
+    if (!cuenta) {
+      const err = new Error('Cuenta no encontrada');
+      err.code = 'NOT_FOUND';
+      throw err;
+    }
+    if (restaurante_id && Number(restaurante_id) !== Number(cuenta.restaurante_id)) {
+      const err = new Error('Cuenta fuera de su restaurante');
+      err.code = 'FORBIDDEN';
+      throw err;
+    }
+    if (!Number(cuenta.app_comprobantes_activo || 0)) {
+      const err = new Error('Este restaurante no permite emitir comprobantes desde AppYoko');
+      err.code = 'FORBIDDEN';
+      throw err;
+    }
+    if (String(cuenta.estado || '').toUpperCase() !== 'PAGADA') {
+      const err = new Error('Solo se puede emitir comprobante de una cuenta pagada');
+      err.code = 'INVALID_STATE';
+      throw err;
+    }
+
+    const [existingDocuments] = await conn.execute(
+      `SELECT comp.id
+       FROM comprobantes comp
+       LEFT JOIN comprobantes nc ON nc.id = (
+         SELECT nc2.id FROM comprobantes nc2
+         WHERE nc2.comprobante_referencia_id = comp.id
+           AND nc2.tipo = 'NOTA_CREDITO'
+           AND nc2.sunat_estado <> 'RECHAZADO'
+         ORDER BY nc2.id DESC LIMIT 1
+       )
+       WHERE comp.cuenta_id = ?
+         AND comp.tipo <> 'NOTA_CREDITO'
+         AND comp.estado <> 'ANULADO'
+         AND nc.id IS NULL
+       LIMIT 1`,
+      [cuenta_id]
+    );
+    if (existingDocuments?.length) {
+      const err = new Error('Esta cuenta ya tiene un comprobante activo');
+      err.code = 'INVALID_STATE';
+      throw err;
+    }
+
+    const [payments] = await conn.execute(
+      `SELECT id, metodo_pago_id, sesion_caja_id
+       FROM pagos
+       WHERE pedido_id = ?
+         AND estado = 'ACTIVO'
+         AND referencia = ?
+       ORDER BY fecha_pago DESC, id DESC
+       LIMIT 1
+       FOR UPDATE`,
+      [cuenta.pedido_id, `Pago cuenta #${cuenta_id}`]
+    );
+    const payment = payments?.[0];
+    if (!payment) {
+      const err = new Error('No se encontró un pago activo para esta cuenta');
+      err.code = 'INVALID_STATE';
+      throw err;
+    }
+
+    const [[client]] = await conn.execute('SELECT * FROM clientes WHERE id = ? LIMIT 1', [cliente_id]);
+    validateFiscalClient(tipo, client);
+
+    const detalles = await getCuentaDetalles(cuenta_id, conn);
+    if (!detalles.length) {
+      const err = new Error('La cuenta no tiene detalles');
+      err.code = 'INVALID_INPUT';
+      throw err;
+    }
+
+    const totalCuenta = money(cuenta.total);
+    const descuento = money(cuenta.descuento);
+    const total = money(totalCuenta - descuento);
+    const igvPorcentaje = await taxService.getPercentageByRestaurant(cuenta.restaurante_id, conn);
+    const { subtotal, igv } = taxService.calculateIncluded(total, igvPorcentaje);
+    const numeracion = await nextSerie(tipo, cuenta.restaurante_id || 1, conn);
+    const [res] = await conn.execute(
+      `INSERT INTO comprobantes
+       (cuenta_id, sucursal_id, cliente_id, tipo, serie, numero, fecha_emision,
+        subtotal, descuento, igv, igv_porcentaje, total, metodo_pago_id, sesion_caja_id, usuario_id, origen, estado)
+       VALUES (?, ?, ?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, 'APPYOKO', 'EMITIDO')`,
+      [
+        cuenta_id,
+        cuenta.sucursal_id,
+        cliente_id,
+        tipo,
+        numeracion.serie,
+        numeracion.numero,
+        subtotal.toFixed(2),
+        descuento.toFixed(2),
+        igv.toFixed(2),
+        igvPorcentaje.toFixed(2),
+        total.toFixed(2),
+        payment.metodo_pago_id,
+        payment.sesion_caja_id || null,
+        usuario_id || null,
+      ]
+    );
+    const comprobanteId = res.insertId;
+    for (const detalle of detalles) {
+      const pedidoCantidad = Number(detalle.pedido_cantidad || 1) || 1;
+      const unitSubtotal = Number(detalle.pedido_subtotal || 0) / pedidoCantidad;
+      const cantidad = Number(detalle.cantidad || 1);
+      await conn.execute(
+        `INSERT INTO comprobante_detalles
+         (comprobante_id, producto_id, descripcion, cantidad, precio_unitario, subtotal)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          comprobanteId,
+          detalle.producto_id || null,
+          detalle.producto_nombre || 'Producto',
+          cantidad,
+          Number(detalle.precio_unitario || unitSubtotal).toFixed(2),
+          money(unitSubtotal * cantidad).toFixed(2)
+        ]
+      );
+    }
+
+    await conn.execute('UPDATE pagos SET comprobante_id = ? WHERE id = ?', [comprobanteId, payment.id]);
+    await sunatService.enqueueComprobante(comprobanteId, conn);
+    await conn.commit();
+
+    const receipt = await getById(comprobanteId);
+    try {
+      await trabajoImpresionService.enqueueReceipt(receipt);
+    } catch (printError) {
+      console.error('No se pudo encolar el comprobante de AppYoko', printError);
     }
     return receipt;
   } catch (err) {
@@ -800,6 +1012,7 @@ module.exports = {
   create,
   createWithConnection,
   createDirect,
+  createFromPaidAccountForApp,
   createCreditNote,
   cancelPayment,
   nextSerie,

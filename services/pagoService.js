@@ -82,7 +82,7 @@ async function processPayment({
   try {
     await conn.beginTransaction();
     const [accountRows] = await conn.execute(
-      `SELECT c.*, p.sucursal_id, p.estado AS pedido_estado
+      `SELECT c.*, p.sucursal_id, p.estado AS pedido_estado, p.mesa_id
        FROM cuentas c
        JOIN pedidos p ON p.id = c.pedido_id
        WHERE c.id = ?
@@ -219,6 +219,9 @@ async function processPayment({
     const pedidoCerrado = Number(openRows?.[0]?.pendientes || 0) === 0;
     if (pedidoCerrado && cuenta.pedido_estado !== 'ENTREGADO') {
       await conn.execute('UPDATE pedidos SET estado = "ENTREGADO" WHERE id = ?', [cuenta.pedido_id]);
+      if (cuenta.mesa_id) {
+        await conn.execute('UPDATE mesas SET estado = "LIBRE" WHERE id = ?', [cuenta.mesa_id]);
+      }
       await conn.execute(
         `INSERT INTO historial_estado_pedido (pedido_id, estado, usuario_id, observacion)
          VALUES (?, 'ENTREGADO', ?, ?)`,
@@ -249,4 +252,241 @@ async function processPayment({
   }
 }
 
-module.exports = { listByPedido, create, processPayment };
+async function payAccount({
+  cuenta_id,
+  metodo_pago_id,
+  usuario_id,
+  sesion_caja_id,
+  observacion
+}) {
+  const conn = await db.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [accountRows] = await conn.execute(
+      `SELECT c.*, p.sucursal_id, p.estado AS pedido_estado, p.mesa_id
+       FROM cuentas c
+       JOIN pedidos p ON p.id = c.pedido_id
+       WHERE c.id = ?
+       LIMIT 1
+       FOR UPDATE`,
+      [cuenta_id]
+    );
+    const cuenta = accountRows?.[0];
+    if (!cuenta) {
+      const err = new Error('Cuenta no encontrada');
+      err.code = 'NOT_FOUND';
+      throw err;
+    }
+    if (!metodo_pago_id || !sesion_caja_id) {
+      const err = new Error('Seleccione método de pago y caja');
+      err.code = 'INVALID_INPUT';
+      throw err;
+    }
+    if (!['ABIERTA', 'FACTURADA'].includes(String(cuenta.estado || '').toUpperCase())) {
+      const err = new Error('Esta cuenta ya fue pagada');
+      err.code = 'INVALID_STATE';
+      throw err;
+    }
+
+    const [methodRows] = await conn.execute(
+      'SELECT id FROM metodos_pago WHERE id = ? AND activo = 1 LIMIT 1',
+      [metodo_pago_id]
+    );
+    if (!methodRows?.length) {
+      const err = new Error('El método de pago no está disponible');
+      err.code = 'INVALID_INPUT';
+      throw err;
+    }
+
+    const activeSession = await cajaService.getById(sesion_caja_id);
+    if (!activeSession || activeSession.estado !== 'ABIERTA' || Number(activeSession.sucursal_id) !== Number(cuenta.sucursal_id)) {
+      const err = new Error('La caja seleccionada no está abierta para esta sucursal');
+      err.code = 'CAJA_NO_ABIERTA';
+      throw err;
+    }
+
+    const reference = `Pago cuenta #${cuenta_id}`;
+    const monto = Number(cuenta.total || 0).toFixed(2);
+    const [paymentRows] = await conn.execute(
+      `SELECT id
+       FROM pagos
+       WHERE pedido_id = ?
+         AND estado = 'ACTIVO'
+         AND metodo_pago_id = ?
+         AND ABS(monto - ?) < 0.01
+         AND sesion_caja_id = ?
+         AND referencia = ?
+       ORDER BY id DESC
+       LIMIT 1`,
+      [cuenta.pedido_id, metodo_pago_id, monto, sesion_caja_id, reference]
+    );
+    let pagoId = paymentRows?.[0]?.id || null;
+    if (!pagoId) {
+      const [paymentResult] = await conn.execute(
+        `INSERT INTO pagos
+         (pedido_id, metodo_pago_id, monto, referencia, usuario_id, sesion_caja_id)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          cuenta.pedido_id,
+          metodo_pago_id,
+          monto,
+          reference,
+          usuario_id || null,
+          sesion_caja_id
+        ]
+      );
+      pagoId = paymentResult.insertId;
+    }
+
+    await conn.execute('UPDATE cuentas SET estado = "PAGADA" WHERE id = ?', [cuenta_id]);
+    const [openRows] = await conn.execute(
+      `SELECT COUNT(*) AS pendientes
+       FROM cuentas
+       WHERE pedido_id = ? AND estado NOT IN ('PAGADA', 'ANULADA')`,
+      [cuenta.pedido_id]
+    );
+    const pedidoCerrado = Number(openRows?.[0]?.pendientes || 0) === 0;
+    if (pedidoCerrado && cuenta.pedido_estado !== 'ENTREGADO') {
+      await conn.execute('UPDATE pedidos SET estado = "ENTREGADO" WHERE id = ?', [cuenta.pedido_id]);
+      if (cuenta.mesa_id) {
+        await conn.execute('UPDATE mesas SET estado = "LIBRE" WHERE id = ?', [cuenta.mesa_id]);
+      }
+      await conn.execute(
+        `INSERT INTO historial_estado_pedido (pedido_id, estado, usuario_id, observacion)
+         VALUES (?, 'ENTREGADO', ?, ?)`,
+        [cuenta.pedido_id, usuario_id || null, observacion || 'Pedido cerrado al completar el pago']
+      );
+    }
+
+    await conn.commit();
+    return {
+      ok: true,
+      cuenta_id: Number(cuenta_id),
+      pago_id: Number(pagoId),
+      pedido_id: Number(cuenta.pedido_id),
+      pedido_cerrado: pedidoCerrado
+    };
+  } catch (err) {
+    await conn.rollback();
+    throw err;
+  } finally {
+    conn.release();
+  }
+}
+
+async function cancelAccountPayment({
+  cuenta_id,
+  pago_id,
+  motivo_anulacion,
+  usuario_id
+}) {
+  const reason = String(motivo_anulacion || '').trim();
+  if (reason.length < 3) {
+    const err = new Error('Ingrese el motivo de la anulación');
+    err.code = 'INVALID_INPUT';
+    throw err;
+  }
+
+  const conn = await db.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [accountRows] = await conn.execute(
+      `SELECT c.*, p.id AS pedido_id, p.mesa_id, p.estado AS pedido_estado
+       FROM cuentas c
+       JOIN pedidos p ON p.id = c.pedido_id
+       WHERE c.id = ?
+       LIMIT 1
+       FOR UPDATE`,
+      [cuenta_id]
+    );
+    const cuenta = accountRows?.[0];
+    if (!cuenta) {
+      const err = new Error('Cuenta no encontrada');
+      err.code = 'NOT_FOUND';
+      throw err;
+    }
+
+    const [activeDocuments] = await conn.execute(
+      `SELECT comp.id
+       FROM comprobantes comp
+       LEFT JOIN comprobantes nc ON nc.id = (
+         SELECT nc2.id
+         FROM comprobantes nc2
+         WHERE nc2.comprobante_referencia_id = comp.id
+           AND nc2.tipo = 'NOTA_CREDITO'
+           AND nc2.sunat_estado <> 'RECHAZADO'
+         ORDER BY nc2.id DESC
+         LIMIT 1
+       )
+       WHERE comp.cuenta_id = ?
+         AND comp.tipo <> 'NOTA_CREDITO'
+         AND comp.estado <> 'ANULADO'
+         AND nc.id IS NULL
+       LIMIT 1`,
+      [cuenta_id]
+    );
+    if (activeDocuments?.length) {
+      const err = new Error('Primero anule el comprobante antes de anular el pago');
+      err.code = 'INVALID_STATE';
+      throw err;
+    }
+
+    const params = pago_id
+      ? [pago_id, cuenta.pedido_id]
+      : [cuenta.pedido_id, `Pago cuenta #${cuenta_id}`];
+    const [paymentRows] = await conn.execute(
+      pago_id
+        ? `SELECT id
+           FROM pagos
+           WHERE id = ? AND pedido_id = ? AND estado = 'ACTIVO'
+           LIMIT 1
+           FOR UPDATE`
+        : `SELECT id
+           FROM pagos
+           WHERE pedido_id = ? AND referencia = ? AND estado = 'ACTIVO'
+           ORDER BY id DESC
+           LIMIT 1
+           FOR UPDATE`,
+      params
+    );
+    const payment = paymentRows?.[0];
+    if (!payment) {
+      const err = new Error('No se encontró un pago activo para anular');
+      err.code = 'INVALID_STATE';
+      throw err;
+    }
+
+    await conn.execute(
+      `UPDATE pagos
+       SET estado = 'ANULADO', motivo_anulacion = ?, anulado_at = NOW(), anulado_por = ?
+       WHERE id = ?`,
+      [reason, usuario_id || null, payment.id]
+    );
+    await conn.execute('UPDATE cuentas SET estado = "ABIERTA" WHERE id = ?', [cuenta_id]);
+    await conn.execute('UPDATE pedidos SET estado = "LISTO" WHERE id = ?', [cuenta.pedido_id]);
+    if (cuenta.mesa_id) {
+      await conn.execute('UPDATE mesas SET estado = "OCUPADA" WHERE id = ?', [cuenta.mesa_id]);
+    }
+    await conn.execute(
+      `INSERT INTO historial_estado_pedido (pedido_id, estado, usuario_id, observacion)
+       VALUES (?, 'LISTO', ?, ?)`,
+      [cuenta.pedido_id, usuario_id || null, `Pago anulado: ${reason}`]
+    );
+
+    await conn.commit();
+    return {
+      ok: true,
+      cuenta_id: Number(cuenta_id),
+      pago_id: Number(payment.id),
+      pedido_id: Number(cuenta.pedido_id),
+      estado: 'ANULADO'
+    };
+  } catch (err) {
+    await conn.rollback();
+    throw err;
+  } finally {
+    conn.release();
+  }
+}
+
+module.exports = { listByPedido, create, processPayment, payAccount, cancelAccountPayment };

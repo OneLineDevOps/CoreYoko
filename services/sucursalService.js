@@ -24,7 +24,7 @@ async function getByRestaurant(restaurante_id, { includeInactive = false } = {})
   if (!restaurante_id) return [];
   try {
     const [rows] = await db.query(
-      `SELECT s.*, r.igv_porcentaje
+      `SELECT s.*, r.igv_porcentaje, r.app_comprobantes_activo
        FROM sucursales s
        JOIN restaurantes r ON r.id = s.restaurante_id
        WHERE s.restaurante_id = ? ${includeInactive ? '' : 'AND s.activo = 1'}
@@ -41,7 +41,7 @@ async function getByRestaurant(restaurante_id, { includeInactive = false } = {})
 async function getById(id) {
   try {
     const [rows] = await db.query(
-      `SELECT s.*, r.igv_porcentaje
+      `SELECT s.*, r.igv_porcentaje, r.app_comprobantes_activo
        FROM sucursales s
        JOIN restaurantes r ON r.id = s.restaurante_id
        WHERE s.id = ?
@@ -59,7 +59,7 @@ async function getByCode(code) {
   if (!normalized) return null;
   try {
     const [rows] = await db.query(
-      `SELECT s.*, r.igv_porcentaje
+      `SELECT s.*, r.igv_porcentaje, r.app_comprobantes_activo
        FROM sucursales s
        JOIN restaurantes r ON r.id = s.restaurante_id
        WHERE UPPER(s.codigo) = ? AND s.activo = 1

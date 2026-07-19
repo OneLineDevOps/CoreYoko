@@ -68,6 +68,25 @@ router.post('/facturador', ...documentAccess, async (req, res) => {
   }
 });
 
+router.post('/app', auth, async (req, res) => {
+  try {
+    const created = await comprobanteService.createFromPaidAccountForApp({
+      ...req.body,
+      usuario_id: req.user?.id || null,
+      restaurante_id: req.user?.restaurante_id || null,
+    });
+    res.status(201).json(created);
+  } catch (err) {
+    if (err.code === 'NOT_FOUND') return res.status(404).json({ error: err.message });
+    if (err.code === 'FORBIDDEN') return res.status(403).json({ error: err.message });
+    if (err.code === 'INVALID_INPUT') return res.status(400).json({ error: err.message });
+    if (err.code === 'INVALID_STATE') return res.status(409).json({ error: err.message });
+    if (err.code === 'SERIE_LOCK') return res.status(503).json({ error: err.message });
+    console.error(err);
+    res.status(500).json({ error: 'No se pudo emitir el comprobante desde AppYoko' });
+  }
+});
+
 router.post('/:id/sunat/reintentar', ...fiscalAccess, async (req, res) => {
   try {
     const access = await canAccessFiscalDocument(req, req.params.id);
